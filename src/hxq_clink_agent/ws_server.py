@@ -1,0 +1,85 @@
+"""WebSocket 路由 - 接受天润融通客户端连接并处理实时语音流."""
+
+import json
+from urllib.parse import parse_qs
+
+from fastapi import APIRouter, WebSocket
+from loguru import logger
+
+from .adapters import ASRStub, LLMStub, TTSStub
+from .auth import verify_auth
+from .config import Settings
+from .pipeline import Pipeline
+from .session import Session
+
+router = APIRouter()
+settings = Settings()
+
+# 活跃会话跟踪
+_sessions: dict[str, Session] = {}
+
+
+def get_active_session_count() -> int:
+    """获取当前活跃会话数."""
+    return len(_sessions)
+
+
+@router.websocket(settings.ws_path)
+async def websocket_endpoint(ws: WebSocket) -> None:
+    """天润融通 PCM 语音流 WebSocket 端点."""
+
+    # 解析查询参数
+    query_string = str(ws.scope.get("query_string", b""), "utf-8")
+    params = {k: v[0] for k, v in parse_qs(query_string).items()}
+
+    logger.info(
+        f"New WS connection: uniqueId={params.get('uniqueId', 'N/A')}, "
+        f"cno={params.get('cno', 'N/A')}"
+    )
+
+    # 验证签名
+    if settings.auth_enabled:
+        auth_string = params.get("authString", "")
+        if not verify_auth(auth_string, settings.access_key_secret):
+            logger.warning(
+                f"Auth failed for uniqueId={params.get('uniqueId', 'N/A')}"
+            )
+            # 发送拒绝消息后关闭连接
+            await ws.accept()
+            await ws.send_text(
+                json.dumps({"event": "error", "message": "拒绝建立连接：签名验证失败"})
+            )
+            await ws.close(4001, "Authentication failed")
+            return
+        logger.debug("Auth verification passed")
+    else:
+        logger.debug("Auth verification disabled, skipping")
+
+    # 接受连接
+    await ws.accept()
+
+    # 创建管线（使用 Stub 适配器，后续替换为真实实现）
+    pipeline = Pipeline(
+        asr=ASRStub(),
+        llm=LLMStub(),
+        tts=TTSStub(),
+        sample_rate=settings.pcm_sample_rate,
+    )
+
+    # 创建并运行会话
+    session = Session(
+        ws=ws,
+        pipeline=pipeline,
+        settings=settings,
+        params=params,
+    )
+    _sessions[session.session_id] = session
+
+    try:
+        await session.run()
+    finally:
+        _sessions.pop(session.session_id, None)
+        logger.info(
+            f"WS connection closed: sessionId={session.session_id}, "
+            f"uniqueId={session.unique_id}"
+        )

@@ -1,0 +1,37 @@
+# hxq-clink-agent docker-compose 配置
+# 启动方式：docker compose up -d
+
+services:
+  hxq-clink-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hxq-clink-agent:latest
+    container_name: hxq-clink-agent
+    restart: unless-stopped
+
+    # 服务端口映射（HTTP + WebSocket 统一端口，从 .env 的 HXQ_PORT 读取）
+    ports:
+      - "${HXQ_PORT:-8000}:${HXQ_PORT:-8000}"
+
+    # 源码目录映射（宿主机修改实时生效，便于开发调试）
+    volumes:
+      - ./src/hxq_clink_agent:/app/src/hxq_clink_agent
+
+    # 从宿主机 .env 读取环境变量（HXQ_ 前缀的配置项）
+    env_file:
+      - .env
+
+    # 日志
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    # 资源限制（可按需调整）
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
