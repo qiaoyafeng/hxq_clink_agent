@@ -36,6 +36,24 @@ class Settings(BaseSettings):
 
     # ── 运行模式 ──
     production: bool = True  # 生产环境关闭 Swagger UI 等调试工具
+    use_stub: bool = False  # 使用 Stub 适配器（开发调试用）
+
+    # ── DashScope 配置 ──
+    dashscope_api_key: str = ""
+
+    # ── ASR 配置 ──
+    asr_model: str = "paraformer-realtime-8k-v2"
+
+    # ── LLM 配置（OpenAI 兼容接口） ──
+    llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    llm_model: str = "qwen-turbo"
+    llm_system_prompt: str = "你是一个智能语音助手，请用简洁的语言回答用户的问题。"
+
+    # ── TTS 配置（DashScope REST API） ──
+    tts_base_url: str = "https://dashscope.aliyuncs.com/api/v1"
+    tts_model: str = "cosyvoice-v2-0.5b"
+    tts_voice: str = "longxiaochun_v2"
+    tts_sample_rate: int = 22050
 
     # ── 日志 ──
     log_level: str = "INFO"

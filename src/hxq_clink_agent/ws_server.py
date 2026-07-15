@@ -6,7 +6,7 @@ from urllib.parse import parse_qs
 from fastapi import APIRouter, WebSocket
 from loguru import logger
 
-from .adapters import ASRStub, LLMStub, TTSStub
+from .adapters import ASRDashScope, ASRStub, LLMOpenAI, LLMStub, TTSDashScope, TTSStub
 from .auth import verify_auth
 from .config import Settings
 from .pipeline import Pipeline
@@ -55,13 +55,34 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     # 接受连接
     await ws.accept()
 
-    # 创建管线（使用 Stub 适配器，后续替换为真实实现）
-    pipeline = Pipeline(
-        asr=ASRStub(),
-        llm=LLMStub(),
-        tts=TTSStub(),
-        sample_rate=settings.pcm_sample_rate,
-    )
+    # 创建管线（根据配置选择 Stub 或真实适配器）
+    if settings.use_stub:
+        pipeline = Pipeline(
+            asr=ASRStub(),
+            llm=LLMStub(),
+            tts=TTSStub(),
+            sample_rate=settings.pcm_sample_rate,
+        )
+    else:
+        pipeline = Pipeline(
+            asr=ASRDashScope(
+                api_key=settings.dashscope_api_key,
+                model=settings.asr_model,
+            ),
+            llm=LLMOpenAI(
+                api_key=settings.dashscope_api_key,
+                base_url=settings.llm_base_url,
+                model=settings.llm_model,
+                system_prompt=settings.llm_system_prompt,
+            ),
+            tts=TTSDashScope(
+                api_key=settings.dashscope_api_key,
+                base_url=settings.tts_base_url,
+                model=settings.tts_model,
+                voice=settings.tts_voice,
+            ),
+            sample_rate=settings.pcm_sample_rate,
+        )
 
     # 创建并运行会话
     session = Session(

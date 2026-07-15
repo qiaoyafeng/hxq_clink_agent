@@ -35,6 +35,12 @@ def main() -> None:
     logger.info(f"  WS path   : {settings.ws_path}")
     logger.info(f"  PCM: {settings.pcm_sample_rate}Hz / {settings.pcm_sample_width}bit")
     logger.info(f"  VAD: silence={settings.vad_silence_sec}s, threshold={settings.vad_energy_threshold}")
+    if settings.use_stub:
+        logger.info("  Adapters  : STUB (ASRStub / LLMStub / TTSStub)")
+    else:
+        logger.info(f"  ASR       : {settings.asr_model}")
+        logger.info(f"  LLM       : {settings.llm_model} @ {settings.llm_base_url}")
+        logger.info(f"  TTS       : {settings.tts_model} (voice={settings.tts_voice})")
 
     uvicorn.run(
         "hxq_clink_agent.app:app",
