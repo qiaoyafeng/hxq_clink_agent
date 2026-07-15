@@ -32,10 +32,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     query_string = str(ws.scope.get("query_string", b""), "utf-8")
     params = {k: v[0] for k, v in parse_qs(query_string).items()}
 
-    logger.info(
-        f"New WS connection: uniqueId={params.get('uniqueId', 'N/A')}, "
-        f"cno={params.get('cno', 'N/A')}"
-    )
+    logger.info(f"New WS connection: {params}")
 
     # 验证签名
     if settings.auth_enabled:
