@@ -1,5 +1,7 @@
 """LLM 适配器 - 通过 OpenAI 兼容接口调用大语言模型."""
 
+import time
+
 import httpx
 from loguru import logger
 
@@ -41,6 +43,7 @@ class LLMOpenAI(LLMInterface):
         messages.extend(history)
 
         try:
+            t_start = time.monotonic()
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
                     f"{self._base_url}/chat/completions",
@@ -57,7 +60,8 @@ class LLMOpenAI(LLMInterface):
                 data = response.json()
 
             content = data["choices"][0]["message"]["content"]
-            logger.debug(f"LLM reply: {content!r}")
+            elapsed = time.monotonic() - t_start
+            logger.info(f"LLM reply ({elapsed:.2f}s): {content!r}")
             return content
 
         except httpx.HTTPStatusError as e:

@@ -1,6 +1,7 @@
 """管线编排 - ASR → LLM → TTS 全链路处理."""
 
 import asyncio
+import time
 
 from loguru import logger
 
@@ -42,27 +43,37 @@ class Pipeline:
             TTS 合成的 PCM 回复音频；若处理失败返回 None
         """
         self._processing = True
+        total_start = time.monotonic()
         try:
             # 1. ASR：语音转文本
             logger.info(f"Pipeline: ASR processing {len(pcm)} bytes")
+            t0 = time.monotonic()
             text = await self._asr.recognize(pcm, self._sample_rate)
+            asr_elapsed = time.monotonic() - t0
             if not text or not text.strip():
-                logger.debug("Pipeline: ASR returned empty text, skipping")
+                logger.debug(f"Pipeline: ASR returned empty text ({asr_elapsed:.2f}s), skipping")
                 return None
-            logger.info(f"Pipeline: ASR result: {text}")
+            logger.info(f"Pipeline: ASR done in {asr_elapsed:.2f}s | text: {text!r}")
 
             # 2. LLM：生成回复
             self._history.append({"role": "user", "content": text})
+            t0 = time.monotonic()
             reply = await self._llm.chat(text, self._history)
+            llm_elapsed = time.monotonic() - t0
             if not reply or not reply.strip():
-                logger.debug("Pipeline: LLM returned empty reply, skipping")
+                logger.debug(f"Pipeline: LLM returned empty reply ({llm_elapsed:.2f}s), skipping")
                 return None
             self._history.append({"role": "assistant", "content": reply})
-            logger.info(f"Pipeline: LLM reply: {reply}")
+            logger.info(f"Pipeline: LLM done in {llm_elapsed:.2f}s | reply: {reply!r}")
 
             # 3. TTS：文本转语音
+            t0 = time.monotonic()
             tts_pcm = await self._tts.synthesize(reply, self._sample_rate)
-            logger.info(f"Pipeline: TTS generated {len(tts_pcm)} bytes")
+            tts_elapsed = time.monotonic() - t0
+            logger.info(f"Pipeline: TTS done in {tts_elapsed:.2f}s | {len(tts_pcm)} bytes")
+
+            total_elapsed = time.monotonic() - total_start
+            logger.info(f"Pipeline: total {total_elapsed:.2f}s")
 
             return tts_pcm
 

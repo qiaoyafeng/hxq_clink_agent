@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import time
 import wave
 from http import HTTPStatus
 
@@ -41,6 +42,7 @@ class ASRDashScope(ASRInterface):
             return ""
 
         wav_path = None
+        t_start = time.monotonic()
         try:
             # 将 raw PCM 写入临时 WAV 文件
             wav_path = self._pcm_to_wav(pcm, sample_rate)
@@ -68,7 +70,8 @@ class ASRDashScope(ASRInterface):
 
             # 拼接所有识别出的句子
             text = "".join(s.get("text", "") for s in sentences).strip()
-            logger.debug(f"ASR result: {text!r}")
+            elapsed = time.monotonic() - t_start
+            logger.info(f"ASR result ({elapsed:.2f}s): {text!r}")
             return text
 
         except Exception as e:

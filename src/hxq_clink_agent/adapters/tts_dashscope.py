@@ -2,6 +2,7 @@
 
 import base64
 import json
+import time
 
 import httpx
 from loguru import logger
@@ -52,6 +53,7 @@ class TTSDashScope(TTSInterface):
 
         pcm_chunks: list[bytes] = []
         url = f"{self._base_url}/services/audio/tts/SpeechSynthesizer"
+        t_start = time.monotonic()
 
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -88,7 +90,8 @@ class TTSDashScope(TTSInterface):
                             pcm_chunks.append(chunk)
 
             pcm = b"".join(pcm_chunks)
-            logger.debug(f"TTS generated {len(pcm)} bytes from {len(text)} chars")
+            elapsed = time.monotonic() - t_start
+            logger.info(f"TTS generated {len(pcm)} bytes from {len(text)} chars ({elapsed:.2f}s)")
             return pcm
 
         except Exception as e:
