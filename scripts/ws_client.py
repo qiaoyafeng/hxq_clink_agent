@@ -4,6 +4,9 @@
     # 仅连接（不发送音频，但会播放服务端返回的音频）
     uv run python scripts/ws_client.py
 
+    # 指定远程 WebSocket URL（跳过本地鉴权 URL 生成）
+    uv run python scripts/ws_client.py --url ws://remote-host:18000/realtime_voice?...
+
     # 连接并实时推送音频文件（支持 .wav 和 .pcm）
     uv run python scripts/ws_client.py --file path/to/audio.wav
     uv run python scripts/ws_client.py --file path/to/audio.pcm
@@ -469,6 +472,10 @@ async def connect_and_listen(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="WebSocket 测试客户端")
+    parser.add_argument(
+        "--url", "-u", default=None,
+        help="直接指定完整 WebSocket URL（跳过本地鉴权 URL 生成）",
+    )
     parser.add_argument("--file", "-f", help="要推送的音频文件路径（支持 .wav 和 .pcm）")
     parser.add_argument(
         "--sample-rate", "-r", type=int, default=8000,
@@ -493,6 +500,7 @@ if __name__ == "__main__":
     args = _parse_args()
     asyncio.run(
         connect_and_listen(
+            url=args.url,
             pcm_file=args.file,
             sample_rate=args.sample_rate,
             frame_size=args.frame_size,
