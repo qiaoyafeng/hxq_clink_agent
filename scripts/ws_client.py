@@ -24,6 +24,7 @@ import queue
 import threading
 import time
 import wave
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -43,8 +44,13 @@ def generate_ws_url(
     app_id: str | None = None,
     access_key_id: str | None = None,
     access_key_secret: str | None = None,
-    unique_id: str = "test-001",
+    unique_id: str | None = None,
+    enterprise_id: str | None = None,
     cno: str = "1001",
+    monitor_side: str = "0",
+    customer_number: str = "",
+    agent_number: str = "",
+    user_field: str = "",
 ) -> str:
     """生成带鉴权参数的完整 WebSocket URL.
 
@@ -60,9 +66,20 @@ def generate_ws_url(
     app_id = app_id or _settings.app_id
     access_key_id = access_key_id or _settings.access_key_id
     access_key_secret = access_key_secret or _settings.access_key_secret
+    enterprise_id = enterprise_id or app_id
+    unique_id = unique_id or f"medias_1-{time.time_ns() / 1e6:.5f}"
+    agent_number = agent_number or cno
 
-    timestamp = str(int(time.time()))
-    auth_string = generate_auth_string(app_id, access_key_id, timestamp, access_key_secret)
+    # 时间戳
+    now_ms = int(time.time() * 1000)
+    call_start_timestamp = str(now_ms)
+    timestamp = str(now_ms)
+
+    # authString 使用格式化时间戳，URL 查询参数使用毫秒时间戳
+    auth_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    auth_string = generate_auth_string(
+        app_id, access_key_id, auth_timestamp, access_key_secret
+    )
 
     # 打印各参数明细
     print("=" * 60)
@@ -72,10 +89,18 @@ def generate_ws_url(
     print(f"  port              : {port}")
     print(f"  ws_path           : {ws_path}")
     print(f"  uniqueId          : {unique_id}")
+    print(f"  enterpriseId      : {enterprise_id}")
     print(f"  cno               : {cno}")
+    print(f"  monitorSide       : {monitor_side}")
+    print(f"  customerNumber    : {customer_number}")
+    print(f"  agentNumber       : {agent_number}")
+    print(f"  sampleRate        : {_settings.pcm_sample_rate}")
+    print(f"  sampleWidth       : {_settings.pcm_sample_width}")
+    print(f"  callStartTimestamp: {call_start_timestamp}")
+    print(f"  timestamp         : {timestamp}")
     print(f"  appId             : {app_id}")
     print(f"  accessKeyId       : {access_key_id}")
-    print(f"  timestamp         : {timestamp}")
+    print(f"  authTimestamp     : {auth_timestamp}")
     print(f"  accessKeySecret   : {access_key_secret}")
     print(f"  authString (编码) : {auth_string}")
     print("=" * 60)
@@ -83,8 +108,17 @@ def generate_ws_url(
     url = (
         f"ws://{host}:{port}{ws_path}"
         f"?uniqueId={unique_id}"
+        f"&monitorSide={monitor_side}"
+        f"&callStartTimestamp={call_start_timestamp}"
+        f"&timestamp={timestamp}"
+        f"&enterpriseId={enterprise_id}"
         f"&cno={cno}"
+        f"&customerNumber={customer_number}"
+        f"&agentNumber={agent_number}"
+        f"&sampleRate={_settings.pcm_sample_rate}"
+        f"&sampleWidth={_settings.pcm_sample_width}"
         f"&authString={auth_string}"
+        f"&userField={user_field}"
     )
     print(f"\n完整 URL:\n  {url}\n")
     return url

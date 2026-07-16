@@ -49,7 +49,7 @@ def generate_auth_string(
     """
     signature = generate_signature(app_id, access_key_id, timestamp, secret_key)
     raw_auth = f"{app_id},{access_key_id},{timestamp},{signature}"
-    return quote(raw_auth, safe="")
+    return quote_plus(raw_auth, safe="")
 
 
 def verify_auth(auth_string: str, secret_key: str) -> bool:
