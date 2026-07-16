@@ -1,6 +1,8 @@
 """LLM 适配器 - 通过 OpenAI 兼容接口调用大语言模型."""
 
+import json
 import time
+from collections.abc import AsyncGenerator
 
 import httpx
 from loguru import logger
@@ -73,3 +75,63 @@ class LLMOpenAI(LLMInterface):
         except Exception as e:
             logger.error(f"LLM OpenAI exception: {e}")
             return ""
+
+    async def chat_stream(
+        self, text: str, history: list[dict[str, str]]
+    ) -> AsyncGenerator[str, None]:
+        """流式生成回复，通过 SSE 逐 token yield 文本片段.
+
+        使用 OpenAI Chat Completions 的 stream=true 模式，
+        解析 SSE 事件流并逐步 yield delta.content。
+        """
+        messages: list[dict[str, str]] = [{"role": "system", "content": self._system_prompt}]
+        messages.extend(history)
+
+        try:
+            t_start = time.monotonic()
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self._base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self._model,
+                        "messages": messages,
+                        "stream": True,
+                    },
+                ) as response:
+                    if response.status_code != 200:
+                        body = await response.aread()
+                        logger.error(
+                            f"LLM OpenAI stream HTTP error: status={response.status_code}, "
+                            f"body={body.decode('utf-8', errors='replace')[:200]}"
+                        )
+                        return
+
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                            delta = data["choices"][0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                yield content
+                        except (json.JSONDecodeError, KeyError, IndexError) as e:
+                            logger.debug(f"LLM stream parse skip: {e}")
+                            continue
+
+            elapsed = time.monotonic() - t_start
+            logger.info(f"LLM stream completed ({elapsed:.2f}s)")
+
+        except Exception as e:
+            logger.error(f"LLM OpenAI stream exception: {e}")

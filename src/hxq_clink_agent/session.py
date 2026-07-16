@@ -60,6 +60,9 @@ class Session:
         # 流式 ASR 句子消费 task
         self._sentence_task: asyncio.Task | None = None
 
+        # 流式音频发送缓冲（用于累积不足一帧的残余数据）
+        self._send_buffer = b""
+
         logger.info(
             f"Session created: id={self.session_id}, "
             f"uniqueId={self.unique_id}, cno={self.cno}, "
@@ -121,16 +124,19 @@ class Session:
                 logger.error(f"Session {self.session_id}: sentence consumer error: {e}")
 
     async def _on_sentence_recognized(self, text: str) -> None:
-        """流式 ASR 识别到完整句子后的处理."""
+        """流式 ASR 识别到完整句子后的处理（流式 LLM + TTS）."""
         logger.info(
             f"Session {self.session_id}: sentence recognized: {text!r}"
         )
 
-        # 送入管线处理（跳过 ASR，直接 LLM → TTS）
-        tts_pcm = await self._pipeline.process_text(text)
-
-        if tts_pcm and not self._closed:
-            await self._send_audio_frames(tts_pcm)
+        # 流式管线处理：LLM 流式 → 断句 → TTS 流式 → 逐块发送
+        self._send_buffer = b""
+        async for pcm_chunk in self._pipeline.process_text_stream(text):
+            if self._closed:
+                break
+            await self._send_audio_chunk(pcm_chunk)
+        # 刷出缓冲区剩余数据
+        await self._flush_send_buffer()
 
     async def _handle_text_message(self, message: str) -> None:
         """处理文本消息."""
@@ -154,16 +160,19 @@ class Session:
             )
 
     async def _on_speech_segment(self, pcm: bytes) -> None:
-        """回退模式：VAD 检测到一段完整语音后的回调处理."""
+        """回退模式：VAD 检测到一段完整语音后的回调处理（流式）."""
         logger.info(
             f"Session {self.session_id}: speech segment, {len(pcm)} bytes"
         )
 
-        # 送入管线处理（含 ASR 步骤）
-        tts_pcm = await self._pipeline.process(pcm)
-
-        if tts_pcm and not self._closed:
-            await self._send_audio_frames(tts_pcm)
+        # 流式管线处理：ASR → LLM 流式 → TTS 流式 → 逐块发送
+        self._send_buffer = b""
+        async for pcm_chunk in self._pipeline.process_stream(pcm):
+            if self._closed:
+                break
+            await self._send_audio_chunk(pcm_chunk)
+        # 刷出缓冲区剩余数据
+        await self._flush_send_buffer()
 
     async def _send_audio_frames(self, pcm: bytes) -> None:
         """按帧（frame_size/frame_interval）发送 TTS PCM 数据回客户端."""
@@ -186,6 +195,46 @@ class Session:
 
         logger.debug(
             f"Session {self.session_id}: sent {offset} bytes of TTS audio"
+        )
+
+    async def _send_audio_chunk(self, chunk: bytes) -> None:
+        """发送流式 TTS PCM 数据块，累积满一帧后发送.
+
+        将收到的 PCM chunk 加入内部缓冲区，累积达到 frame_size 后
+        发送给客户端，不足一帧的部分继续缓冲。
+        """
+        self._send_buffer += chunk
+        frame_size = self._settings.pcm_frame_size
+        frame_interval = self._settings.pcm_frame_interval
+
+        while len(self._send_buffer) >= frame_size and not self._closed:
+            frame = self._send_buffer[:frame_size]
+            self._send_buffer = self._send_buffer[frame_size:]
+            try:
+                await self._ws.send_bytes(frame)
+            except Exception as e:
+                logger.error(
+                    f"Session {self.session_id}: failed to send audio chunk: {e}"
+                )
+                return
+            # 帧间隔控制
+            if self._send_buffer:
+                await asyncio.sleep(frame_interval)
+
+    async def _flush_send_buffer(self) -> None:
+        """刷出音频发送缓冲区中的剩余数据."""
+        if self._send_buffer and not self._closed:
+            try:
+                await self._ws.send_bytes(self._send_buffer)
+            except Exception as e:
+                logger.error(
+                    f"Session {self.session_id}: failed to flush send buffer: {e}"
+                )
+            finally:
+                self._send_buffer = b""
+
+        logger.debug(
+            f"Session {self.session_id}: stream audio send complete"
         )
 
     async def _cleanup(self) -> None:

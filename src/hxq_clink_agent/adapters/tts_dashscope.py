@@ -3,6 +3,7 @@
 import base64
 import json
 import time
+from collections.abc import AsyncGenerator
 
 import httpx
 from loguru import logger
@@ -129,3 +130,68 @@ class TTSDashScope(TTSInterface):
         except (json.JSONDecodeError, KeyError) as e:
             logger.debug(f"TTS SSE parse skip: {e}")
             return None
+
+    async def synthesize_stream(
+        self, text: str, sample_rate: int = 8000
+    ) -> AsyncGenerator[bytes, None]:
+        """流式将文本合成为 PCM 音频，逐块 yield.
+
+        通过 SSE 流式接收 base64 编码的 PCM 数据块，
+        解码后立即 yield，不等待全部完成。
+
+        Args:
+            text: 待合成的文本
+            sample_rate: 目标采样率，默认 8000Hz
+
+        Yields:
+            PCM 字节数据块（16bit signed LE）
+        """
+        if not text or not text.strip():
+            return
+
+        url = f"{self._base_url}/services/audio/tts/SpeechSynthesizer"
+        t_start = time.monotonic()
+        total_bytes = 0
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream(
+                    "POST",
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                        "X-DashScope-SSE": "enable",
+                    },
+                    json={
+                        "model": self._model,
+                        "input": {
+                            "text": text,
+                            "voice": self._voice,
+                            "format": "pcm",
+                            "sample_rate": sample_rate,
+                        },
+                    },
+                ) as response:
+                    if response.status_code != 200:
+                        body = await response.aread()
+                        logger.error(
+                            f"TTS DashScope stream error: status={response.status_code}, "
+                            f"body={body.decode('utf-8', errors='replace')[:200]}"
+                        )
+                        return
+
+                    async for event_data in self._iter_sse_events(response):
+                        chunk = self._extract_audio(event_data)
+                        if chunk:
+                            total_bytes += len(chunk)
+                            yield chunk
+
+            elapsed = time.monotonic() - t_start
+            logger.info(
+                f"TTS stream generated {total_bytes} bytes from "
+                f"{len(text)} chars ({elapsed:.2f}s)"
+            )
+
+        except Exception as e:
+            logger.error(f"TTS DashScope stream exception: {e}")
