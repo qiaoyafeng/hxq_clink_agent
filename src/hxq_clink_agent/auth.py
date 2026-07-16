@@ -3,7 +3,7 @@
 import base64
 import hashlib
 import hmac
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, quote_plus
 
 
 def _build_base_string(app_id: str, access_key_id: str, timestamp: str) -> str:
@@ -13,7 +13,7 @@ def _build_base_string(app_id: str, access_key_id: str, timestamp: str) -> str:
     """
     raw = f"{app_id},{access_key_id},{timestamp}"
     # 按文档示例，逗号被编码为 %2C，冒号被编码为 %3A 等
-    return quote(raw, safe="")
+    return quote_plus(raw, safe="")
 
 
 def _compute_signature(secret_key: str, base_string: str) -> str:
