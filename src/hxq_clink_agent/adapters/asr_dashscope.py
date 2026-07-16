@@ -65,6 +65,7 @@ class ASRDashScope(ASRInterface):
                 return ""
 
             sentences = result.get_sentence()
+            logger.info(f"ASR result: {sentences}")
             if not sentences:
                 return ""
 
