@@ -4,14 +4,15 @@
     # 仅连接（不发送音频，但会播放服务端返回的音频）
     uv run python scripts/ws_client.py
 
-    # 连接并实时推送 PCM 文件，同时播放服务端返回的 TTS 音频
+    # 连接并实时推送音频文件（支持 .wav 和 .pcm）
+    uv run python scripts/ws_client.py --file path/to/audio.wav
     uv run python scripts/ws_client.py --file path/to/audio.pcm
 
     # 自定义推流参数（默认 4096 bytes/帧, 250ms 间隔 = 16KB/s）
     uv run python scripts/ws_client.py --file audio.pcm --frame-size 4096 --frame-interval 0.25
 
     # 不播放服务端返回音频
-    uv run python scripts/ws_client.py --file audio.pcm --no-playback
+    uv run python scripts/ws_client.py --file audio.wav --no-playback
 
 或在代码中直接调用 generate_ws_url() 获取完整 URL。
 """
@@ -22,6 +23,7 @@ import json
 import queue
 import threading
 import time
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -92,6 +94,68 @@ def generate_ws_url(
 # PCM 推流
 # ---------------------------------------------------------------------------
 
+def _load_audio_file(
+    file_path: str, target_sample_rate: int = 8000
+) -> tuple[bytes, int]:
+    """加载音频文件，支持 WAV 和 raw PCM 格式.
+
+    对于 WAV 文件：
+    - 自动解析头部，提取采样率、位宽等信息
+    - 若采样率与目标不匹配，自动重采样
+    - 只返回纯 PCM 数据（无 WAV 头）
+
+    Args:
+        file_path: 音频文件路径（.wav 或 .pcm）
+        target_sample_rate: 目标采样率
+
+    Returns:
+        (pcm_bytes, actual_sample_rate) 元组
+    """
+    path = Path(file_path)
+    suffix = path.suffix.lower()
+
+    if suffix == ".wav":
+        with wave.open(str(path), "rb") as wf:
+            channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
+            src_rate = wf.getframerate()
+            raw_pcm = wf.readframes(wf.getnframes())
+
+        print(f"[WAV] 解析文件头部:")
+        print(f"      采样率     : {src_rate} Hz")
+        print(f"      声道数     : {channels}")
+        print(f"      位宽       : {sample_width * 8} bit")
+        print(f"      PCM 大小  : {len(raw_pcm)} bytes")
+
+        # 转单声道
+        if channels > 1:
+            samples = np.frombuffer(raw_pcm, dtype=np.int16)
+            samples = samples.reshape(-1, channels)
+            samples = samples[:, 0]  # 取第一声道
+            raw_pcm = samples.tobytes()
+            print(f"      已转单声道 : {len(raw_pcm)} bytes")
+
+        # 重采样
+        if src_rate != target_sample_rate:
+            print(f"      重采样     : {src_rate} Hz -> {target_sample_rate} Hz")
+            samples = np.frombuffer(raw_pcm, dtype=np.int16).astype(np.float64)
+            # 线性插值重采样
+            src_length = len(samples)
+            target_length = int(src_length * target_sample_rate / src_rate)
+            x_src = np.linspace(0, 1, src_length)
+            x_target = np.linspace(0, 1, target_length)
+            resampled = np.interp(x_target, x_src, samples)
+            raw_pcm = resampled.astype(np.int16).tobytes()
+            print(f"      重采样后   : {len(raw_pcm)} bytes ({target_length} samples)")
+
+        return raw_pcm, target_sample_rate
+
+    else:
+        # raw PCM 文件，直接读取
+        raw_pcm = path.read_bytes()
+        return raw_pcm, target_sample_rate
+
+
 async def _send_pcm(
     ws,
     file_path: str,
@@ -99,47 +163,48 @@ async def _send_pcm(
     frame_size: int = 4096,
     frame_interval: float = 0.25,
 ) -> None:
-    """读取 PCM 文件并以实时节奏分帧发送，结束后发送 end 信号."""
+    """读取音频文件并以实时节奏分帧发送，结束后发送 end 信号."""
     pcm_path = Path(file_path)
     if not pcm_path.is_file():
-        print(f"[ERROR] PCM 文件不存在: {file_path}")
+        print(f"[ERROR] 音频文件不存在: {file_path}")
         return
 
-    file_size = pcm_path.stat().st_size
-    bytes_per_sample = 2  # 16-bit PCM
-    duration = file_size / (sample_rate * bytes_per_sample)
+    # 加载并预处理音频（解析WAV头、重采样等）
+    pcm_data, actual_rate = _load_audio_file(file_path, sample_rate)
 
-    print(f"[PCM] 文件       : {pcm_path}")
-    print(f"[PCM] 文件大小   : {file_size} bytes")
-    print(f"[PCM] 采样率     : {sample_rate} Hz")
-    print(f"[PCM] 帧大小     : {frame_size} bytes")
-    print(f"[PCM] 帧间隔     : {frame_interval * 1000:.0f} ms")
-    print(f"[PCM] 推流速率   : {frame_size / frame_interval / 1024:.1f} KB/s")
-    print(f"[PCM] 预计时长   : {duration:.2f} s")
-    print(f"[PCM] 开始实时推流...\n")
+    file_size = len(pcm_data)
+    bytes_per_sample = 2  # 16-bit PCM
+    duration = file_size / (actual_rate * bytes_per_sample)
+
+    print(f"\n[推流] 文件       : {pcm_path}")
+    print(f"[推流] PCM 大小   : {file_size} bytes")
+    print(f"[推流] 采样率     : {actual_rate} Hz")
+    print(f"[推流] 帧大小     : {frame_size} bytes")
+    print(f"[推流] 帧间隔     : {frame_interval * 1000:.0f} ms")
+    print(f"[推流] 推流速率   : {frame_size / frame_interval / 1024:.1f} KB/s")
+    print(f"[推流] 预计时长   : {duration:.2f} s")
+    print(f"[推流] 开始实时推流...\n")
 
     sent_frames = 0
-    with pcm_path.open("rb") as f:
-        start_time = time.monotonic()
-        while True:
-            chunk = f.read(frame_size)
-            if not chunk:
-                break
-            await ws.send(chunk)
-            sent_frames += 1
+    offset = 0
+    start_time = time.monotonic()
 
-            # 按实时节奏等待，避免一次性灌入全部数据
-            expected_elapsed = sent_frames * frame_interval
-            actual_elapsed = time.monotonic() - start_time
-            sleep_time = expected_elapsed - actual_elapsed
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
+    while offset < file_size:
+        chunk = pcm_data[offset : offset + frame_size]
+        if not chunk:
+            break
+        await ws.send(chunk)
+        sent_frames += 1
+        offset += len(chunk)
 
-    print(f"\n[PCM] 推流完成，共发送 {sent_frames} 帧 ({file_size} bytes)")
+        # 按实时节奏等待，避免一次性灌入全部数据
+        expected_elapsed = sent_frames * frame_interval
+        actual_elapsed = time.monotonic() - start_time
+        sleep_time = expected_elapsed - actual_elapsed
+        if sleep_time > 0:
+            await asyncio.sleep(sleep_time)
 
-    # 按协议发送结束信号，通知服务端 flush 缓冲区
-    await ws.send(json.dumps({"action": "end"}))
-    print("[PCM] 已发送 end 信号\n")
+    print(f"\n[推流] 推流完成，共发送 {sent_frames} 帧 ({file_size} bytes)\n")
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +305,12 @@ class AudioPlayer:
 # 主连接逻辑
 # ---------------------------------------------------------------------------
 
+# 空闲超时时间（秒）：推流完成后若无服务端消息则发送 end
+IDLE_TIMEOUT_SEC = 30
+# 发送 end 后等待播放剩余音频的时间（秒）
+POST_END_WAIT_SEC = 30
+
+
 async def connect_and_listen(
     url: str | None = None,
     pcm_file: str | None = None,
@@ -248,7 +319,13 @@ async def connect_and_listen(
     frame_interval: float = 0.25,
     playback: bool = True,
 ) -> None:
-    """建立 WebSocket 连接，接收服务端消息，并可选地实时推送 PCM 音频和播放回传音频."""
+    """建立 WebSocket 连接，接收服务端消息，并可选地实时推送 PCM 音频和播放回传音频.
+
+    推流完成后的行为：
+    - 推流结束后等待 30s，期间收到服务端消息则重置计时
+    - 30s 无消息则发送 end 信号
+    - 发送 end 后再等待 30s（播放剩余音频），然后断开
+    """
     url = url or generate_ws_url()
     print(f"[INFO] 连接 URL:\n  {url}\n")
 
@@ -258,11 +335,17 @@ async def connect_and_listen(
         print("[OK] 连接建立成功，等待服务端消息...\n")
 
         send_task: asyncio.Task | None = None
+        send_done = False  # 推流是否已完成
+        end_sent = False  # end 信号是否已发送
+        last_server_msg_time = 0.0  # 最近一次服务端消息时间
 
         async def _recv_and_dispatch():
             """接收消息：JSON 事件 + binary 音频帧."""
-            nonlocal send_task
+            nonlocal send_task, last_server_msg_time
             async for raw_msg in ws:
+                # 更新最后收到服务端消息的时间
+                last_server_msg_time = time.monotonic()
+
                 if isinstance(raw_msg, bytes):
                     # 服务端回传的 TTS PCM 音频
                     if player:
@@ -277,7 +360,7 @@ async def connect_and_listen(
 
                 if event == "started" and pcm_file and send_task is None:
                     print(f"\n[INFO] 会话已启动，sessionId: {msg.get('sessionId')}")
-                    print(f"[INFO] 即将推送 PCM 文件: {pcm_file}\n")
+                    print(f"[INFO] 即将推送音频文件: {pcm_file}\n")
                     send_task = asyncio.create_task(
                         _send_pcm(ws, pcm_file, sample_rate, frame_size, frame_interval)
                     )
@@ -289,11 +372,53 @@ async def connect_and_listen(
                 tasks = [recv_task]
                 if send_task and not send_task.done():
                     tasks.append(send_task)
-                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
-                if send_task and send_task.done():
-                    print("[INFO] PCM 推流+end 已完成，继续监听服务端消息...\n")
+                # 设置等待超时
+                timeout = None
+                if send_done and not end_sent:
+                    # 推流完成但还没发 end：计算剩余等待时间
+                    elapsed_since_msg = time.monotonic() - last_server_msg_time
+                    timeout = max(0.1, IDLE_TIMEOUT_SEC - elapsed_since_msg)
+                elif end_sent:
+                    # end 已发送：等待固定 30s 后退出
+                    break
+
+                done, _ = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED, timeout=timeout
+                )
+
+                # 检查推流是否完成
+                if send_task and send_task.done() and not send_done:
+                    send_done = True
+                    last_server_msg_time = time.monotonic()  # 以推流完成时刻开始计时
+                    print("[INFO] 推流完成，等待服务端响应（空闲 30s 后发送 end）...\n")
                     send_task = None
+
+                # 检查空闲超时：推流完成后 30s 无服务端消息
+                if send_done and not end_sent:
+                    elapsed = time.monotonic() - last_server_msg_time
+                    if elapsed >= IDLE_TIMEOUT_SEC:
+                        print(f"[INFO] 空闲 {IDLE_TIMEOUT_SEC}s 无服务端消息，发送 end 信号")
+                        try:
+                            await ws.send(json.dumps({"action": "end"}))
+                            end_sent = True
+                        except (websockets.ConnectionClosed, websockets.ConnectionClosedOK):
+                            print("[INFO] 服务端已关闭连接，无需发送 end 信号")
+                            end_sent = True
+                        print(f"[INFO] 已发送 end，等待 {POST_END_WAIT_SEC}s 播放剩余音频后退出...\n")
+                        break
+
+            # 如果 recv_task 已结束（服务端关闭连接）但 end 还没发，补发
+            if recv_task.done() and send_done and not end_sent:
+                print("[INFO] 服务端连接已关闭，跳过 end 信号发送\n")
+                end_sent = True
+
+            # end 发送后（或连接已关闭后）等待 30s，让音频播放完毕
+            if end_sent:
+                print(f"[INFO] 等待 {POST_END_WAIT_SEC}s 让剩余音频播放完毕...\n")
+                await asyncio.sleep(POST_END_WAIT_SEC)
+                print(f"[INFO] 等待完成，关闭连接\n")
+
         except asyncio.CancelledError:
             pass
         finally:
@@ -310,7 +435,7 @@ async def connect_and_listen(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="WebSocket 测试客户端")
-    parser.add_argument("--file", "-f", help="要推送的 PCM 文件路径")
+    parser.add_argument("--file", "-f", help="要推送的音频文件路径（支持 .wav 和 .pcm）")
     parser.add_argument(
         "--sample-rate", "-r", type=int, default=8000,
         help="采样率 (默认 8000 Hz)",

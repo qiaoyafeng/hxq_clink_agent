@@ -7,6 +7,7 @@ import uuid
 from fastapi import WebSocket, WebSocketDisconnect
 from loguru import logger
 
+from .adapters.asr_dashscope_streaming import ASRStreamingDashScope
 from .audio_buffer import AudioBuffer
 from .config import Settings
 from .pipeline import Pipeline
@@ -17,8 +18,9 @@ class Session:
 
     职责：
     - 接收客户端推送的 PCM binary 数据
-    - 通过 AudioBuffer + VAD 切割语音段
-    - 将语音段送入 Pipeline 处理
+    - 流式模式：将 PCM 帧直接转发到 DashScope 流式 ASR，由服务端 VAD 断句
+    - 回退模式：通过 AudioBuffer + 本地 VAD 切割语音段
+    - 将识别文本送入 Pipeline（LLM → TTS）处理
     - 将 TTS 结果按帧回传给客户端
     """
 
@@ -28,6 +30,7 @@ class Session:
         pipeline: Pipeline,
         settings: Settings,
         params: dict[str, str],
+        asr_streaming: ASRStreamingDashScope | None = None,
     ):
         self.session_id = str(uuid.uuid4())
         self.unique_id = params.get("uniqueId", "unknown")
@@ -40,23 +43,38 @@ class Session:
         self._settings = settings
         self._closed = False
 
-        # 初始化音频缓冲
-        self._audio_buffer = AudioBuffer(
-            sample_rate=settings.pcm_sample_rate,
-            sample_width=settings.pcm_sample_width,
-            silence_sec=settings.vad_silence_sec,
-            energy_threshold=settings.vad_energy_threshold,
-            on_speech=self._on_speech_segment,
-        )
+        # 流式 ASR（优先使用）
+        self._asr_streaming = asr_streaming
+
+        # 回退模式：本地 VAD 音频缓冲（仅在非流式模式下使用）
+        self._audio_buffer: AudioBuffer | None = None
+        if self._asr_streaming is None:
+            self._audio_buffer = AudioBuffer(
+                sample_rate=settings.pcm_sample_rate,
+                sample_width=settings.pcm_sample_width,
+                silence_sec=settings.vad_silence_sec,
+                energy_threshold=settings.vad_energy_threshold,
+                on_speech=self._on_speech_segment,
+            )
+
+        # 流式 ASR 句子消费 task
+        self._sentence_task: asyncio.Task | None = None
 
         logger.info(
             f"Session created: id={self.session_id}, "
-            f"uniqueId={self.unique_id}, cno={self.cno}"
+            f"uniqueId={self.unique_id}, cno={self.cno}, "
+            f"streaming={'yes' if self._asr_streaming else 'no'}"
         )
 
     async def run(self) -> None:
         """会话主循环：接收消息并处理."""
         try:
+            # 启动流式 ASR
+            if self._asr_streaming:
+                await self._asr_streaming.start()
+                # 启动并发 task 持续消费已识别的句子
+                self._sentence_task = asyncio.create_task(self._consume_sentences())
+
             # 发送 started 事件
             await self._ws.send_text(
                 json.dumps({"event": "started", "sessionId": self.session_id})
@@ -68,7 +86,12 @@ class Session:
                 if message["type"] == "websocket.receive":
                     if "bytes" in message and message["bytes"]:
                         # 二进制数据 = PCM 音频
-                        await self._audio_buffer.feed(message["bytes"])
+                        if self._asr_streaming:
+                            # 流式模式：直接转发到 DashScope
+                            self._asr_streaming.feed(message["bytes"])
+                        elif self._audio_buffer:
+                            # 回退模式：本地 VAD
+                            await self._audio_buffer.feed(message["bytes"])
                     elif "text" in message and message["text"]:
                         # 文本消息
                         await self._handle_text_message(message["text"])
@@ -82,6 +105,33 @@ class Session:
         finally:
             await self._cleanup()
 
+    async def _consume_sentences(self) -> None:
+        """持续从流式 ASR 获取完整句子并触发 Pipeline 处理."""
+        while not self._closed and self._asr_streaming:
+            try:
+                text = await self._asr_streaming.get_sentence()
+                if text is None:
+                    # 识别结束或出错
+                    break
+                if text.strip() and not self._closed:
+                    await self._on_sentence_recognized(text)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Session {self.session_id}: sentence consumer error: {e}")
+
+    async def _on_sentence_recognized(self, text: str) -> None:
+        """流式 ASR 识别到完整句子后的处理."""
+        logger.info(
+            f"Session {self.session_id}: sentence recognized: {text!r}"
+        )
+
+        # 送入管线处理（跳过 ASR，直接 LLM → TTS）
+        tts_pcm = await self._pipeline.process_text(text)
+
+        if tts_pcm and not self._closed:
+            await self._send_audio_frames(tts_pcm)
+
     async def _handle_text_message(self, message: str) -> None:
         """处理文本消息."""
         try:
@@ -90,8 +140,9 @@ class Session:
 
             if action == "end":
                 logger.info(f"Session {self.session_id}: received end action")
-                # 刷出缓冲区剩余音频
-                await self._audio_buffer.flush()
+                # 回退模式：刷出缓冲区剩余音频
+                if self._audio_buffer:
+                    await self._audio_buffer.flush()
                 self._closed = True
             else:
                 logger.warning(
@@ -103,16 +154,15 @@ class Session:
             )
 
     async def _on_speech_segment(self, pcm: bytes) -> None:
-        """VAD 检测到一段完整语音后的回调处理."""
+        """回退模式：VAD 检测到一段完整语音后的回调处理."""
         logger.info(
             f"Session {self.session_id}: speech segment, {len(pcm)} bytes"
         )
 
-        # 送入管线处理
+        # 送入管线处理（含 ASR 步骤）
         tts_pcm = await self._pipeline.process(pcm)
 
         if tts_pcm and not self._closed:
-            # 按帧发送 TTS 音频
             await self._send_audio_frames(tts_pcm)
 
     async def _send_audio_frames(self, pcm: bytes) -> None:
@@ -141,6 +191,22 @@ class Session:
     async def _cleanup(self) -> None:
         """会话清理."""
         self._closed = True
-        self._audio_buffer.reset()
+
+        # 停止流式 ASR
+        if self._asr_streaming:
+            await self._asr_streaming.stop()
+
+        # 取消句子消费 task
+        if self._sentence_task and not self._sentence_task.done():
+            self._sentence_task.cancel()
+            try:
+                await self._sentence_task
+            except asyncio.CancelledError:
+                pass
+
+        # 重置回退模式缓冲区
+        if self._audio_buffer:
+            self._audio_buffer.reset()
+
         self._pipeline.clear_history()
         logger.info(f"Session {self.session_id}: cleaned up")

@@ -83,6 +83,53 @@ class Pipeline:
         finally:
             self._processing = False
 
+    async def process_text(self, text: str) -> bytes | None:
+        """从文本开始处理：LLM → TTS（跳过 ASR）.
+
+        用于流式 ASR 已识别出完整句子后的后续处理。
+
+        Args:
+            text: 已识别的用户语音文本
+
+        Returns:
+            TTS 合成的 PCM 回复音频；若处理失败返回 None
+        """
+        if not text or not text.strip():
+            return None
+
+        self._processing = True
+        total_start = time.monotonic()
+        try:
+            logger.info(f"Pipeline: process_text | input: {text!r}")
+
+            # 1. LLM：生成回复
+            self._history.append({"role": "user", "content": text})
+            t0 = time.monotonic()
+            reply = await self._llm.chat(text, self._history)
+            llm_elapsed = time.monotonic() - t0
+            if not reply or not reply.strip():
+                logger.debug(f"Pipeline: LLM returned empty reply ({llm_elapsed:.2f}s), skipping")
+                return None
+            self._history.append({"role": "assistant", "content": reply})
+            logger.info(f"Pipeline: LLM done in {llm_elapsed:.2f}s | reply: {reply!r}")
+
+            # 2. TTS：文本转语音
+            t0 = time.monotonic()
+            tts_pcm = await self._tts.synthesize(reply, self._sample_rate)
+            tts_elapsed = time.monotonic() - t0
+            logger.info(f"Pipeline: TTS done in {tts_elapsed:.2f}s | {len(tts_pcm)} bytes")
+
+            total_elapsed = time.monotonic() - total_start
+            logger.info(f"Pipeline: process_text total {total_elapsed:.2f}s")
+
+            return tts_pcm
+
+        except Exception as e:
+            logger.error(f"Pipeline: process_text error: {e}")
+            return None
+        finally:
+            self._processing = False
+
     def clear_history(self) -> None:
         """清除对话历史."""
         self._history.clear()
