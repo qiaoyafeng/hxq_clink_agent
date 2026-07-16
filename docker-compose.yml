@@ -15,8 +15,10 @@ services:
       - "${HXQ_PORT:-8000}:${HXQ_PORT:-8000}"
 
     # 源码目录映射（宿主机修改实时生效，便于开发调试）
+    # 日志目录映射（将容器内日志持久化到宿主机，便于排查问题）
     volumes:
       - ./src/hxq_clink_agent:/app/src/hxq_clink_agent
+      - ./logs:/app/logs
 
     # 从宿主机 .env 读取环境变量（HXQ_ 前缀的配置项）
     env_file:
