@@ -114,7 +114,12 @@ class Session:
             try:
                 text = await self._asr_streaming.get_sentence()
                 if text is None:
-                    # 识别结束或出错
+                    # 识别结束或出错：主动结束会话，避免继续空转
+                    logger.warning(
+                        f"Session {self.session_id}: ASR stream ended, closing session"
+                    )
+                    await self._notify_client_error("asr_stream_ended")
+                    self._closed = True
                     break
                 if text.strip() and not self._closed:
                     await self._on_sentence_recognized(text)
@@ -122,6 +127,15 @@ class Session:
                 break
             except Exception as e:
                 logger.error(f"Session {self.session_id}: sentence consumer error: {e}")
+
+    async def _notify_client_error(self, code: str) -> None:
+        """给客户端发送一条错误事件，忽略发送失败."""
+        try:
+            await self._ws.send_text(
+                json.dumps({"event": "error", "code": code})
+            )
+        except Exception:
+            pass
 
     async def _on_sentence_recognized(self, text: str) -> None:
         """流式 ASR 识别到完整句子后的处理（流式 LLM + TTS）."""
@@ -139,7 +153,19 @@ class Session:
         await self._flush_send_buffer()
 
     async def _handle_text_message(self, message: str) -> None:
-        """处理文本消息."""
+        """处理文本消息.
+
+        兼容两类文本帧：
+        1. 内部 JSON 协议：{"action": "end"} —— 由 ws_client 等推流侧发送
+        2. 天润融通 clink 信令协议：|CTL|nn|<payload>
+           - |CTL|00|<json>: 呼叫开始信令，仅记录参数
+           - |CTL|02|:       呼叫结束信令，等价于收到 end action
+        """
+        # 优先识别天润融通 CTL 控制帧
+        if message.startswith("|CTL|"):
+            await self._handle_ctl_frame(message)
+            return
+
         try:
             data = json.loads(message)
             action = data.get("action", "")
@@ -157,6 +183,34 @@ class Session:
         except json.JSONDecodeError:
             logger.warning(
                 f"Session {self.session_id}: invalid JSON message: {message}"
+            )
+
+    async def _handle_ctl_frame(self, message: str) -> None:
+        """解析天润融通 |CTL|nn|<payload> 控制帧."""
+        # 拆分为 ["", "CTL", "nn", "<payload...>"]；payload 中可能含 '|'，故最多切 3 段
+        parts = message.split("|", 3)
+        if len(parts) < 3:
+            logger.warning(
+                f"Session {self.session_id}: malformed CTL frame: {message}"
+            )
+            return
+        ctl_code = parts[2]
+        payload = parts[3] if len(parts) > 3 else ""
+
+        if ctl_code == "00":
+            # 呼叫开始信令：记录参数用于排障
+            logger.info(
+                f"Session {self.session_id}: CTL start signal, payload={payload}"
+            )
+        elif ctl_code == "02":
+            # 呼叫结束信令：等价于 end action，触发会话优雅关闭
+            logger.info(f"Session {self.session_id}: CTL end signal")
+            if self._audio_buffer:
+                await self._audio_buffer.flush()
+            self._closed = True
+        else:
+            logger.debug(
+                f"Session {self.session_id}: ignored CTL frame code={ctl_code}"
             )
 
     async def _on_speech_segment(self, pcm: bytes) -> None:

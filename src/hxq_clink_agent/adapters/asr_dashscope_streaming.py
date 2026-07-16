@@ -14,9 +14,15 @@ from loguru import logger
 class _StreamingCallback(RecognitionCallback):
     """DashScope 流式识别回调，将 sentence_end 事件桥接到 asyncio Queue."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue):
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue,
+        owner: "ASRStreamingDashScope",
+    ):
         self._loop = loop
         self._queue = queue
+        self._owner = owner
 
     def on_open(self) -> None:
         logger.debug("ASR streaming: connection opened")
@@ -34,6 +40,8 @@ class _StreamingCallback(RecognitionCallback):
             f"ASR streaming error: request_id={result.request_id}, "
             f"message={result.message}"
         )
+        # 标记已出错：服务端已断链，后续 stop() 无需再调用 SDK
+        self._owner._errored = True
         # 投递 None 让等待方退出
         self._loop.call_soon_threadsafe(self._queue.put_nowait, None)
 
@@ -74,6 +82,7 @@ class ASRStreamingDashScope:
         self._recognition: Recognition | None = None
         self._queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._started = False
+        self._errored = False
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
@@ -86,7 +95,7 @@ class ASRStreamingDashScope:
         dashscope.api_key = self._api_key
 
         self._loop = asyncio.get_running_loop()
-        callback = _StreamingCallback(self._loop, self._queue)
+        callback = _StreamingCallback(self._loop, self._queue, self)
 
         self._recognition = Recognition(
             model=self._model,
@@ -133,6 +142,14 @@ class ASRStreamingDashScope:
             return
 
         self._started = False
+
+        # 若服务端已出错断链，SDK 侧连接已关闭，无需再调用 stop()
+        # 否则会抛出 "Speech recognition has stopped." 的冗余错误
+        if self._errored:
+            self._recognition = None
+            logger.info("ASR streaming stopped (already closed by server)")
+            return
+
         loop = asyncio.get_running_loop()
         # stop() 是阻塞的，放到线程池执行
         try:
