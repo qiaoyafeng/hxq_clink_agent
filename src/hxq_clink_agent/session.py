@@ -7,7 +7,7 @@ import uuid
 from fastapi import WebSocket, WebSocketDisconnect
 from loguru import logger
 
-from .adapters.asr_dashscope_streaming import ASRStreamingDashScope
+from .interfaces.asr_streaming import ASRStreamingInterface
 from .audio_buffer import AudioBuffer
 from .config import Settings
 from .pipeline import Pipeline
@@ -30,7 +30,7 @@ class Session:
         pipeline: Pipeline,
         settings: Settings,
         params: dict[str, str],
-        asr_streaming: ASRStreamingDashScope | None = None,
+        asr_streaming: ASRStreamingInterface | None = None,
     ):
         self.session_id = str(uuid.uuid4())
         self.unique_id = params.get("uniqueId", "unknown")

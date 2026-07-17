@@ -1,7 +1,8 @@
 """抽象接口包 - ASR / LLM / TTS 的基类定义."""
 
 from .asr import ASRInterface
+from .asr_streaming import ASRStreamingInterface
 from .llm import LLMInterface
 from .tts import TTSInterface
 
-__all__ = ["ASRInterface", "LLMInterface", "TTSInterface"]
+__all__ = ["ASRInterface", "ASRStreamingInterface", "LLMInterface", "TTSInterface"]

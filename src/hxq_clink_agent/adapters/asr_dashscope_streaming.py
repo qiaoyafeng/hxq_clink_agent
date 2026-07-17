@@ -10,6 +10,8 @@ import dashscope
 from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionResult
 from loguru import logger
 
+from ..interfaces.asr_streaming import ASRStreamingInterface
+
 
 class _StreamingCallback(RecognitionCallback):
     """DashScope 流式识别回调，将 sentence_end 事件桥接到 asyncio Queue."""
@@ -67,7 +69,7 @@ class _StreamingCallback(RecognitionCallback):
                 )
 
 
-class ASRStreamingDashScope:
+class ASRStreamingDashScope(ASRStreamingInterface):
     """DashScope Paraformer 流式 ASR 适配器.
 
     每个 Session 创建一个实例，维护一个到 DashScope 的长连接。

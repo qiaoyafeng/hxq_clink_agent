@@ -36,7 +36,12 @@ class Settings(BaseSettings):
 
     # ── 运行模式 ──
     production: bool = True  # 生产环境关闭 Swagger UI 等调试工具
-    use_stub: bool = False  # 使用 Stub 适配器（开发调试用）
+    use_stub: bool = False  # 使用 Stub 适配器（开发调试用，向后兼容，为 True 时覆盖所有 provider 为 stub）
+
+    # ── Provider 选择（可通过环境变量切换实现） ──
+    asr_provider: str = "dashscope"  # 可选: stub | dashscope | funasr
+    llm_provider: str = "openai"    # 可选: stub | openai
+    tts_provider: str = "dashscope"  # 可选: stub | dashscope
 
     # ── DashScope 配置 ──
     dashscope_api_key: str = ""

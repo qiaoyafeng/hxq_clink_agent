@@ -6,15 +6,7 @@ from urllib.parse import parse_qs
 from fastapi import APIRouter, WebSocket
 from loguru import logger
 
-from .adapters import (
-    ASRDashScope,
-    ASRStreamingDashScope,
-    ASRStub,
-    LLMOpenAI,
-    LLMStub,
-    TTSDashScope,
-    TTSStub,
-)
+from .adapters.factory import create_asr, create_asr_streaming, create_llm, create_tts
 from .auth import verify_auth
 from .config import Settings
 from .pipeline import Pipeline
@@ -63,44 +55,14 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     # 接受连接
     await ws.accept()
 
-    # 创建管线和流式 ASR（根据配置选择 Stub 或真实适配器）
-    asr_streaming = None
-    if settings.use_stub:
-        pipeline = Pipeline(
-            asr=ASRStub(),
-            llm=LLMStub(),
-            tts=TTSStub(),
-            sample_rate=settings.pcm_sample_rate,
-        )
-    else:
-        pipeline = Pipeline(
-            asr=ASRDashScope(
-                api_key=settings.dashscope_api_key,
-                model=settings.asr_model,
-            ),
-            llm=LLMOpenAI(
-                api_key=settings.dashscope_api_key,
-                base_url=settings.llm_base_url,
-                model=settings.llm_model,
-                system_prompt=settings.llm_system_prompt,
-            ),
-            tts=TTSDashScope(
-                api_key=settings.dashscope_api_key,
-                base_url=settings.tts_base_url,
-                model=settings.tts_model,
-                voice=settings.tts_voice,
-            ),
-            sample_rate=settings.pcm_sample_rate,
-        )
-
-        # 流式 ASR（仅非 Stub 模式且配置启用时创建）
-        if settings.asr_streaming_enabled:
-            asr_streaming = ASRStreamingDashScope(
-                api_key=settings.dashscope_api_key,
-                model=settings.asr_model,
-                sample_rate=settings.pcm_sample_rate,
-                max_sentence_silence=settings.asr_max_sentence_silence,
-            )
+    # 创建管线和流式 ASR（通过工厂根据配置自动选择 Provider）
+    pipeline = Pipeline(
+        asr=create_asr(settings),
+        llm=create_llm(settings),
+        tts=create_tts(settings),
+        sample_rate=settings.pcm_sample_rate,
+    )
+    asr_streaming = create_asr_streaming(settings)
 
     # 创建并运行会话
     session = Session(
