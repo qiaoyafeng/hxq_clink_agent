@@ -68,6 +68,6 @@ class Settings(BaseSettings):
     # ── 日志 ──
     log_level: str = "INFO"
     access_log: bool = False
-    log_file: str = "logs/app.log"  # 日志文件路径
-    log_rotation: str = "10 MB"  # 单文件达到此大小自动轮转
+    log_file: str = "logs/app_{time:YYYY-MM-DD}.log"  # 日志文件路径（支持 {time} 占位符，按日期生成）
+    log_rotation: str = "00:00"  # 每天午夜轮转
     log_retention: str = "7 days"  # 日志保留时间

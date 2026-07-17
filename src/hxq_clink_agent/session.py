@@ -99,17 +99,31 @@ class Session:
                 if message["type"] == "websocket.receive":
                     if "bytes" in message and message["bytes"]:
                         # 二进制数据 = PCM 音频
+                        audio_data = message["bytes"]
+                        logger.debug(
+                            f"Session {self.session_id}: [audio] "
+                            f"len={len(audio_data)} bytes "
+                            f"head={audio_data[:16].hex()}"
+                        )
                         if self._asr_streaming:
                             # 流式模式：直接转发到 DashScope
-                            self._asr_streaming.feed(message["bytes"])
+                            self._asr_streaming.feed(audio_data)
                         elif self._audio_buffer:
                             # 回退模式：本地 VAD
-                            await self._audio_buffer.feed(message["bytes"])
+                            await self._audio_buffer.feed(audio_data)
                     elif "text" in message and message["text"]:
                         # 文本消息
+                        logger.info(
+                            f"Session {self.session_id}: [text] {message['text']}"
+                        )
                         await self._handle_text_message(message["text"])
                 elif message["type"] == "websocket.disconnect":
+                    logger.info(f"Session {self.session_id}: [disconnect]")
                     break
+                else:
+                    logger.warning(
+                        f"Session {self.session_id}: unknown message type: {message['type']}"
+                    )
 
         except WebSocketDisconnect:
             logger.info(f"Session {self.session_id}: client disconnected")
