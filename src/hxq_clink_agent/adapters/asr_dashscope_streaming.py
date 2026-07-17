@@ -19,10 +19,12 @@ class _StreamingCallback(RecognitionCallback):
         loop: asyncio.AbstractEventLoop,
         queue: asyncio.Queue,
         owner: "ASRStreamingDashScope",
+        voice_activity_event: asyncio.Event,
     ):
         self._loop = loop
         self._queue = queue
         self._owner = owner
+        self._voice_activity_event = voice_activity_event
 
     def on_open(self) -> None:
         logger.debug("ASR streaming: connection opened")
@@ -57,6 +59,12 @@ class _StreamingCallback(RecognitionCallback):
                 self._loop.call_soon_threadsafe(self._queue.put_nowait, text.strip())
         else:
             logger.debug(f"ASR streaming partial: {text!r}")
+            # 非 sentence_end 的 partial result 表示用户正在说话，
+            # 设置 voice activity event 用于 barge-in 检测
+            if text.strip():
+                self._loop.call_soon_threadsafe(
+                    self._voice_activity_event.set
+                )
 
 
 class ASRStreamingDashScope:
@@ -84,6 +92,8 @@ class ASRStreamingDashScope:
         self._started = False
         self._errored = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Barge-in: 用户语音活动事件
+        self._voice_activity_event: asyncio.Event = asyncio.Event()
 
     async def start(self) -> None:
         """启动流式识别连接."""
@@ -95,7 +105,9 @@ class ASRStreamingDashScope:
         dashscope.api_key = self._api_key
 
         self._loop = asyncio.get_running_loop()
-        callback = _StreamingCallback(self._loop, self._queue, self)
+        callback = _StreamingCallback(
+            self._loop, self._queue, self, self._voice_activity_event
+        )
 
         self._recognition = Recognition(
             model=self._model,
@@ -135,6 +147,18 @@ class ASRStreamingDashScope:
             识别完成的文本；若识别结束或出错则返回 None
         """
         return await self._queue.get()
+
+    async def wait_voice_activity(self) -> None:
+        """异步等待用户语音活动信号（ASR partial result）.
+
+        等待 event 被 set 后自动 clear，可反复调用。
+        """
+        await self._voice_activity_event.wait()
+        self._voice_activity_event.clear()
+
+    def clear_voice_activity(self) -> None:
+        """手动清除 voice activity 状态（用于 barge-in 处理后重置）."""
+        self._voice_activity_event.clear()
 
     async def stop(self) -> None:
         """停止识别并关闭连接."""

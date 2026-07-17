@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     asr_streaming_enabled: bool = True  # 是否启用流式ASR（False时回退到本地VAD+非流式）
     asr_max_sentence_silence: int = 800  # 服务端VAD静音断句阈值(ms)，范围200-6000
 
+    # ── 打断（Barge-in）配置 ──
+    barge_in_enabled: bool = True  # 是否启用语音打断（用户说话时取消当前LLM/TTS生成）
+
     # ── LLM 配置（OpenAI 兼容接口） ──
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_model: str = "qwen-turbo"

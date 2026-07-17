@@ -60,6 +60,11 @@ class Session:
         # 流式 ASR 句子消费 task
         self._sentence_task: asyncio.Task | None = None
 
+        # Barge-in: 当前正在执行的 pipeline 处理 task
+        self._processing_task: asyncio.Task | None = None
+        # Barge-in: 监控用户语音活动的 task
+        self._barge_in_task: asyncio.Task | None = None
+
         # 流式音频发送缓冲（用于累积不足一帧的残余数据）
         self._send_buffer = b""
 
@@ -77,6 +82,11 @@ class Session:
                 await self._asr_streaming.start()
                 # 启动并发 task 持续消费已识别的句子
                 self._sentence_task = asyncio.create_task(self._consume_sentences())
+                # 启动 barge-in 监控（仅在配置启用时）
+                if self._settings.barge_in_enabled:
+                    self._barge_in_task = asyncio.create_task(
+                        self._monitor_barge_in()
+                    )
 
             # 发送 started 事件
             await self._ws.send_text(
@@ -122,11 +132,52 @@ class Session:
                     self._closed = True
                     break
                 if text.strip() and not self._closed:
-                    await self._on_sentence_recognized(text)
+                    # 将 pipeline 处理包装为可取消的 task（支持 barge-in）
+                    self._processing_task = asyncio.create_task(
+                        self._on_sentence_recognized(text)
+                    )
+                    try:
+                        await self._processing_task
+                    except asyncio.CancelledError:
+                        logger.info(
+                            f"Session {self.session_id}: processing cancelled "
+                            f"by barge-in, sentence: {text!r}"
+                        )
+                        # 清理未完成的对话历史
+                        self._pipeline.pop_last_user_message()
+                    finally:
+                        self._processing_task = None
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Session {self.session_id}: sentence consumer error: {e}")
+
+    async def _monitor_barge_in(self) -> None:
+        """Barge-in 监控：检测用户语音活动并取消当前处理."""
+        while not self._closed and self._asr_streaming:
+            try:
+                await self._asr_streaming.wait_voice_activity()
+
+                # 检查是否有正在进行的 pipeline 处理
+                if (
+                    self._processing_task
+                    and not self._processing_task.done()
+                ):
+                    logger.info(
+                        f"Session {self.session_id}: barge-in triggered, "
+                        f"cancelling current LLM/TTS processing"
+                    )
+                    self._processing_task.cancel()
+                    # 清空音频发送缓冲区
+                    self._send_buffer = b""
+                    # 清除 voice activity 状态以避免重复触发
+                    self._asr_streaming.clear_voice_activity()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(
+                    f"Session {self.session_id}: barge-in monitor error: {e}"
+                )
 
     async def _notify_client_error(self, code: str) -> None:
         """给客户端发送一条错误事件，忽略发送失败."""
@@ -298,6 +349,22 @@ class Session:
         # 停止流式 ASR
         if self._asr_streaming:
             await self._asr_streaming.stop()
+
+        # 取消 barge-in 监控 task
+        if self._barge_in_task and not self._barge_in_task.done():
+            self._barge_in_task.cancel()
+            try:
+                await self._barge_in_task
+            except asyncio.CancelledError:
+                pass
+
+        # 取消当前处理 task
+        if self._processing_task and not self._processing_task.done():
+            self._processing_task.cancel()
+            try:
+                await self._processing_task
+            except asyncio.CancelledError:
+                pass
 
         # 取消句子消费 task
         if self._sentence_task and not self._sentence_task.done():

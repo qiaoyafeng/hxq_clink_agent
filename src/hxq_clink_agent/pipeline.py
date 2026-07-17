@@ -142,6 +142,14 @@ class Pipeline:
         """清除对话历史."""
         self._history.clear()
 
+    def pop_last_user_message(self) -> None:
+        """移除历史中最后一条 user 角色消息（用于 barge-in 后清理不完整对话）."""
+        for i in range(len(self._history) - 1, -1, -1):
+            if self._history[i]["role"] == "user":
+                self._history.pop(i)
+                logger.debug("Pipeline: popped last user message from history")
+                return
+
     def interrupt(self) -> None:
         """打断当前处理（预留接口，后续可扩展取消逻辑）."""
         logger.debug("Pipeline: interrupt requested")
@@ -218,6 +226,8 @@ class Pipeline:
 
         except Exception as e:
             logger.error(f"Pipeline: process_text_stream error: {e}")
+        except GeneratorExit:
+            logger.info("Pipeline: process_text_stream generator closed (barge-in)")
         finally:
             self._processing = False
 
