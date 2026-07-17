@@ -27,8 +27,8 @@ class Settings(BaseSettings):
     # ── PCM 音频参数 ──
     pcm_sample_rate: int = 8000
     pcm_sample_width: int = 16  # bits
-    pcm_frame_size: int = 4096  # bytes per frame
-    pcm_frame_interval: float = 0.25  # seconds between frames
+    pcm_frame_size: int = 960  # bytes per frame（协议要求 60ms/帧，8k*16bit*60ms=960B）
+    pcm_frame_interval: float = 0.06  # seconds between frames（60ms）
 
     # ── VAD 参数 ──
     vad_silence_sec: float = 0.8

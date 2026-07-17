@@ -11,8 +11,8 @@
     uv run python scripts/ws_client.py --file path/to/audio.wav
     uv run python scripts/ws_client.py --file path/to/audio.pcm
 
-    # 自定义推流参数（默认 4096 bytes/帧, 250ms 间隔 = 16KB/s）
-    uv run python scripts/ws_client.py --file audio.pcm --frame-size 4096 --frame-interval 0.25
+    # 自定义推流参数（默认 960 bytes/帧, 60ms 间隔）
+    uv run python scripts/ws_client.py --file audio.pcm --frame-size 960 --frame-interval 0.06
 
     # 不播放服务端返回音频
     uv run python scripts/ws_client.py --file audio.wav --no-playback
@@ -197,10 +197,10 @@ async def _send_pcm(
     ws,
     file_path: str,
     sample_rate: int = 8000,
-    frame_size: int = 4096,
-    frame_interval: float = 0.25,
+    frame_size: int = 960,
+    frame_interval: float = 0.06,
 ) -> None:
-    """读取音频文件并以实时节奏分帧发送，结束后发送 end 信号."""
+    """读取音频文件并以实时节奏分帧发送，每帧添加 |DAT|00| 帧头."""
     pcm_path = Path(file_path)
     if not pcm_path.is_file():
         print(f"[ERROR] 音频文件不存在: {file_path}")
@@ -222,6 +222,9 @@ async def _send_pcm(
     print(f"[推流] 预计时长   : {duration:.2f} s")
     print(f"[推流] 开始实时推流...\n")
 
+    # 上行音频帧头
+    DAT_UPLINK_HEADER = b"|DAT|00|"
+
     sent_frames = 0
     offset = 0
     start_time = time.monotonic()
@@ -230,7 +233,8 @@ async def _send_pcm(
         chunk = pcm_data[offset : offset + frame_size]
         if not chunk:
             break
-        await ws.send(chunk)
+        # 添加协议帧头
+        await ws.send(DAT_UPLINK_HEADER + chunk)
         sent_frames += 1
         offset += len(chunk)
 
@@ -352,55 +356,93 @@ async def connect_and_listen(
     url: str | None = None,
     pcm_file: str | None = None,
     sample_rate: int = 8000,
-    frame_size: int = 4096,
-    frame_interval: float = 0.25,
+    frame_size: int = 960,
+    frame_interval: float = 0.06,
     playback: bool = True,
 ) -> None:
-    """建立 WebSocket 连接，接收服务端消息，并可选地实时推送 PCM 音频和播放回传音频.
+    """建立 WebSocket 连接，按天润融通协议握手，推流音频并播放回传音频.
 
-    推流完成后的行为：
-    - 推流结束后等待 30s，期间收到服务端消息则重置计时
-    - 30s 无消息则发送 end 信号
-    - 发送 end 后再等待 30s（播放剩余音频），然后断开
+    协议流程：
+    1. 连接后发送 |CTL|00|{param} 开启 session
+    2. 等待 |MSG|00| 响应
+    3. 发送 |DAT|00|{pcm} 音频流
+    4. 接收 |DAT|01|...|{pcm} 下行音频
+    5. 结束时发送 |CTL|02| 挂机信号
     """
     url = url or generate_ws_url()
     print(f"[INFO] 连接 URL:\n  {url}\n")
 
     player = AudioPlayer(sample_rate=sample_rate) if playback else None
 
+    # 构造 CTL|00 握手参数
+    unique_id = f"ws-client-{time.time_ns()}"
+    ctl00_payload = json.dumps({
+        "param": {
+            "enterpriseId": _settings.app_id,
+            "uniqueId": unique_id,
+            "customerNumber": "",
+            "monitorSide": "2",
+            "callType": "1",
+            "userField": {},
+        }
+    })
+
     async with websockets.connect(url) as ws:
-        print("[OK] 连接建立成功，等待服务端消息...\n")
+        print("[OK] 连接建立成功\n")
+
+        # 发送 |CTL|00| 开启 session
+        ctl00_frame = f"|CTL|00|{ctl00_payload}"
+        await ws.send(ctl00_frame)
+        print(f"[SEND] {ctl00_frame[:80]}...\n")
+
+        # 等待 |MSG|00| 响应
+        response = await ws.recv()
+        print(f"[RECV] {response}\n")
+        if isinstance(response, str) and "|MSG|00|" in response:
+            print("[OK] Session 开启成功\n")
+        else:
+            print("[WARN] 未收到预期的 |MSG|00| 响应\n")
 
         send_task: asyncio.Task | None = None
         send_done = False  # 推流是否已完成
-        end_sent = False  # end 信号是否已发送
-        last_server_msg_time = 0.0  # 最近一次服务端消息时间
+        end_sent = False  # 挂机信号是否已发送
+        last_server_msg_time = time.monotonic()
+
+        # 如果有音频文件需要推送，立即开始
+        if pcm_file:
+            print(f"[INFO] 开始推送音频文件: {pcm_file}\n")
+            send_task = asyncio.create_task(
+                _send_pcm(ws, pcm_file, sample_rate, frame_size, frame_interval)
+            )
 
         async def _recv_and_dispatch():
-            """接收消息：JSON 事件 + binary 音频帧."""
-            nonlocal send_task, last_server_msg_time
+            """接收消息：解析协议帧头处理音频和控制帧."""
+            nonlocal last_server_msg_time
             async for raw_msg in ws:
-                # 更新最后收到服务端消息的时间
                 last_server_msg_time = time.monotonic()
 
                 if isinstance(raw_msg, bytes):
-                    # 服务端回传的 TTS PCM 音频
-                    if player:
-                        player.feed(raw_msg)
-                    else:
+                    # 解析下行音频帧: |DAT|01|audio/wav|{key}|{end_flag}|{pcm}
+                    pcm_payload = _parse_dat_downlink(raw_msg)
+                    if player and pcm_payload:
+                        player.feed(pcm_payload)
+                    elif not player:
                         print(f"[RECV] binary {len(raw_msg)} bytes (playback disabled)")
                     continue
 
-                msg = json.loads(raw_msg)
-                event = msg.get("event", "unknown")
-                print(f"[EVENT: {event}] {msg}")
-
-                if event == "started" and pcm_file and send_task is None:
-                    print(f"\n[INFO] 会话已启动，sessionId: {msg.get('sessionId')}")
-                    print(f"[INFO] 即将推送音频文件: {pcm_file}\n")
-                    send_task = asyncio.create_task(
-                        _send_pcm(ws, pcm_file, sample_rate, frame_size, frame_interval)
-                    )
+                # 文本帧解析
+                print(f"[RECV] {raw_msg}")
+                if raw_msg.startswith("|CTL|02|"):
+                    print("[INFO] 收到服务端挂机信号 |CTL|02|")
+                elif raw_msg.startswith("|CTL|04|"):
+                    print("[INFO] 收到资源控制帧 (barge-in 打断)")
+                    if player:
+                        # 清空播放队列
+                        while not player._queue.empty():
+                            try:
+                                player._queue.get_nowait()
+                            except queue.Empty:
+                                break
 
         recv_task = asyncio.create_task(_recv_and_dispatch())
 
@@ -413,11 +455,9 @@ async def connect_and_listen(
                 # 设置等待超时
                 timeout = None
                 if send_done and not end_sent:
-                    # 推流完成但还没发 end：计算剩余等待时间
                     elapsed_since_msg = time.monotonic() - last_server_msg_time
                     timeout = max(0.1, IDLE_TIMEOUT_SEC - elapsed_since_msg)
                 elif end_sent:
-                    # end 已发送：等待固定 30s 后退出
                     break
 
                 done, _ = await asyncio.wait(
@@ -427,30 +467,30 @@ async def connect_and_listen(
                 # 检查推流是否完成
                 if send_task and send_task.done() and not send_done:
                     send_done = True
-                    last_server_msg_time = time.monotonic()  # 以推流完成时刻开始计时
-                    print("[INFO] 推流完成，等待服务端响应（空闲 30s 后发送 end）...\n")
+                    last_server_msg_time = time.monotonic()
+                    print("[INFO] 推流完成，等待服务端响应（空闲 30s 后发送挂机信号）...\n")
                     send_task = None
 
-                # 检查空闲超时：推流完成后 30s 无服务端消息
+                # 检查空闲超时
                 if send_done and not end_sent:
                     elapsed = time.monotonic() - last_server_msg_time
                     if elapsed >= IDLE_TIMEOUT_SEC:
-                        print(f"[INFO] 空闲 {IDLE_TIMEOUT_SEC}s 无服务端消息，发送 end 信号")
+                        print(f"[INFO] 空闲 {IDLE_TIMEOUT_SEC}s 无服务端消息，发送挂机信号 |CTL|02|")
                         try:
-                            await ws.send(json.dumps({"action": "end"}))
+                            await ws.send("|CTL|02|")
                             end_sent = True
                         except (websockets.ConnectionClosed, websockets.ConnectionClosedOK):
-                            print("[INFO] 服务端已关闭连接，无需发送 end 信号")
+                            print("[INFO] 服务端已关闭连接")
                             end_sent = True
-                        print(f"[INFO] 已发送 end，等待 {POST_END_WAIT_SEC}s 播放剩余音频后退出...\n")
+                        print(f"[INFO] 已发送挂机信号，等待 {POST_END_WAIT_SEC}s 播放剩余音频后退出...\n")
                         break
 
-            # 如果 recv_task 已结束（服务端关闭连接）但 end 还没发，补发
+            # 服务端关闭连接的情况
             if recv_task.done() and send_done and not end_sent:
-                print("[INFO] 服务端连接已关闭，跳过 end 信号发送\n")
+                print("[INFO] 服务端连接已关闭\n")
                 end_sent = True
 
-            # end 发送后（或连接已关闭后）等待 30s，让音频播放完毕
+            # 等待剩余音频播放完毕
             if end_sent:
                 print(f"[INFO] 等待 {POST_END_WAIT_SEC}s 让剩余音频播放完毕...\n")
                 await asyncio.sleep(POST_END_WAIT_SEC)
@@ -464,6 +504,28 @@ async def connect_and_listen(
                 send_task.cancel()
             if player:
                 player.stop()
+
+
+def _parse_dat_downlink(data: bytes) -> bytes | None:
+    """解析下行音频帧，提取 PCM payload.
+
+    格式: |DAT|01|audio/wav|{key}|{end_flag}|{pcm_bytes}
+    """
+    # 检查是否以 |DAT|01| 开头
+    prefix = b"|DAT|01|"
+    if not data.startswith(prefix):
+        # 兼容旧协议裸 PCM
+        return data
+
+    # 找到第 5 个 '|' 位置（即 payload 开始处）
+    # |DAT|01|audio/wav|{key}|{end_flag}|
+    count = 0
+    for i, b in enumerate(data):
+        if b == ord("|"):
+            count += 1
+            if count == 6:  # 第 6 个 '|' 后是 PCM 数据
+                return data[i + 1:]
+    return data[len(prefix):]
 
 
 # ---------------------------------------------------------------------------
@@ -482,12 +544,12 @@ def _parse_args() -> argparse.Namespace:
         help="采样率 (默认 8000 Hz)",
     )
     parser.add_argument(
-        "--frame-size", "-s", type=int, default=4096,
-        help="每帧字节数 (默认 4096 bytes，按协议文档)",
+        "--frame-size", "-s", type=int, default=960,
+        help="每帧字节数 (默认 960 bytes，按协议文档 60ms/帧)",
     )
     parser.add_argument(
-        "--frame-interval", "-i", type=float, default=0.25,
-        help="帧间隔秒数 (默认 0.25s = 250ms，按协议文档)",
+        "--frame-interval", "-i", type=float, default=0.06,
+        help="帧间隔秒数 (默认 0.06s = 60ms，按协议文档)",
     )
     parser.add_argument(
         "--no-playback", action="store_true",

@@ -10,6 +10,7 @@ from .adapters.factory import create_asr, create_asr_streaming, create_llm, crea
 from .auth import verify_auth
 from .config import Settings
 from .pipeline import Pipeline
+from .protocol import build_session_result
 from .session import Session
 
 router = APIRouter()
@@ -39,12 +40,16 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         auth_string = params.get("authString", "")
         if not verify_auth(auth_string, settings.access_key_secret):
             logger.warning(
-                f"Auth failed for uniqueId={params.get('uniqueId', 'N/A')}"
+                f"Auth failed for uniqueId={params.get('uniqueId', params.get('uuid', 'N/A'))}"
             )
             # 发送拒绝消息后关闭连接
             await ws.accept()
             await ws.send_text(
-                json.dumps({"event": "error", "message": "拒绝建立连接：签名验证失败"})
+                build_session_result(
+                    params.get("uniqueId", params.get("uuid", "")),
+                    result=1002,
+                    description="无访问权限"
+                )
             )
             await ws.close(4001, "Authentication failed")
             return
