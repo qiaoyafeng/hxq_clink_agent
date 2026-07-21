@@ -136,6 +136,18 @@ def build_dat_downlink(key: int, is_end: bool, pcm: bytes) -> bytes:
     return header + pcm
 
 
+def build_transfer_frame(qno: str) -> str:
+    """构造转人工控制帧（旧方式：仅 qno）.
+
+    Args:
+        qno: 转人工目标队列号
+
+    Returns:
+        格式化的控制帧文本，如 |CTL|03|{"qno":"9999"}
+    """
+    return build_ctl_frame("03", json.dumps({"qno": qno}, ensure_ascii=False))
+
+
 def build_resource_control(key: int) -> str:
     """构造资源控制帧（打断/中断客户端播放）.
 

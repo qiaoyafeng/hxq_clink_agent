@@ -16,6 +16,7 @@ from .protocol import (
     build_dat_downlink,
     build_resource_control,
     build_session_result,
+    build_transfer_frame,
     parse_binary_frame,
     parse_text_frame,
 )
@@ -79,6 +80,18 @@ class Session:
 
         # 下行音频资源 key（每次新的回复递增，用于客户端排序播放）
         self._resource_key: int = 0
+
+        # 转人工状态：True 表示已发送 |CTL|03|，等待客户端 |MSG|02| ACK
+        self._transferring: bool = False
+        # 转人工关键词列表（预解析）
+        if settings.transfer_enabled:
+            self._transfer_keywords: list[str] = [
+                kw.strip()
+                for kw in settings.transfer_keywords.split(",")
+                if kw.strip()
+            ]
+        else:
+            self._transfer_keywords = []
 
         logger.info(
             f"Session created: id={self.session_id}, "
@@ -250,6 +263,10 @@ class Session:
                     self._closed = True
                     break
                 if text.strip() and not self._closed:
+                    # 转人工关键词拦截：命中则不再进入 pipeline，直接发送 |CTL|03|
+                    if self._detect_transfer(text):
+                        await self._trigger_transfer(text)
+                        continue
                     # 将 pipeline 处理包装为可取消的 task（支持 barge-in）
                     self._processing_task = asyncio.create_task(
                         self._on_sentence_recognized(text)
@@ -404,15 +421,62 @@ class Session:
         """处理状态帧."""
         if enum_code == "02":
             # 转人工 ACK（客户端回复）
-            logger.info(
-                f"Session {self.session_id}: MSG|02 transfer ACK received"
-            )
+            if self._transferring:
+                logger.info(
+                    f"Session {self.session_id}: MSG|02 transfer ACK received, disconnecting"
+                )
+            else:
+                logger.info(
+                    f"Session {self.session_id}: MSG|02 received (non-transfer context)"
+                )
             # 收到 ACK 后断开连接
             self._closed = True
         else:
             logger.debug(
                 f"Session {self.session_id}: ignored MSG frame code={enum_code}"
             )
+
+    def _detect_transfer(self, text: str) -> bool:
+        """检测用户文本是否命中转人工关键词（子串包含）."""
+        if not self._transfer_keywords:
+            return False
+        return any(kw in text for kw in self._transfer_keywords)
+
+    async def _trigger_transfer(self, matched_text: str) -> None:
+        """触发转人工：中断当前处理 → 发送 |CTL|03|，等待客户端 |MSG|02| ACK.
+
+        ACK 处理在 _handle_msg_frame 中将 self._closed 置 True，
+        自然退出 run 循环并进入 _cleanup（_send_hangup 会识别 _transferring 直接关闭）。
+        """
+        logger.info(
+            f"Session {self.session_id}: transfer triggered by text: {matched_text!r}, "
+            f"qno={self._settings.transfer_qno}"
+        )
+        self._transferring = True
+
+        # 取消正在进行的 pipeline 处理（若有）
+        if self._processing_task and not self._processing_task.done():
+            self._processing_task.cancel()
+
+        # 发送资源控制帧清客户端已缓存的音频（避免机器人回复与转人工冲突）
+        try:
+            await self._ws.send_text(build_resource_control(self._resource_key))
+        except Exception:
+            pass
+
+        # 发送转人工帧 |CTL|03|{"qno":"..."}
+        try:
+            await self._ws.send_text(
+                build_transfer_frame(self._settings.transfer_qno)
+            )
+        except Exception as e:
+            logger.error(
+                f"Session {self.session_id}: failed to send transfer frame: {e}"
+            )
+            self._closed = True
+            return
+
+        # 后续等待客户端 MSG|02 ACK，主循环会在收到后置 closed=True
 
     async def _on_speech_segment(self, pcm: bytes) -> None:
         """回退模式：VAD 检测到一段完整语音后的回调处理（流式）."""
@@ -561,8 +625,13 @@ class Session:
         """发送挂机信号并延迟关闭 WebSocket 连接.
 
         协议要求服务端发送 |CTL|02| 后 1s 关闭连接。
+        转人工场景（self._transferring=True）不发送 |CTL|02|，
+        直接关闭连接（|CTL|03| + |MSG|02| ACK 已完成交互）。
         """
         try:
+            if self._transferring:
+                await self._ws.close()
+                return
             await self._ws.send_text(build_ctl_frame("02"))
             await asyncio.sleep(1.0)
             await self._ws.close()

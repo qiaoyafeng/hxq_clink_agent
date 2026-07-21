@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # ── 打断（Barge-in）配置 ──
     barge_in_enabled: bool = True  # 是否启用语音打断（用户说话时取消当前LLM/TTS生成）
 
+    # ── 转人工（Transfer to Agent）配置 ──
+    transfer_enabled: bool = True  # 是否启用转人工功能（关键词识别触发）
+    transfer_keywords: str = "转人工,人工客服,人工服务,转接人工,找人工"  # 触发关键词（逗号分隔）
+    transfer_qno: str = "9999"  # 转人工目标队列号
+
     # ── LLM 配置（OpenAI 兼容接口） ──
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_model: str = "qwen-turbo"
