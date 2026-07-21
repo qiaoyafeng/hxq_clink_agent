@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     port: int = 8000
     ws_path: str = "/realtime_voice"
 
+    # ── 并发控制 ──
+    max_concurrent_sessions: int = 10  # 同时进行的最大会话数，0 表示不限制
+
     # ── 鉴权配置（用于验证天润融通客户端签名） ──
     auth_enabled: bool = True  # 是否开启 WebSocket 签名验证
     app_id: str = ""

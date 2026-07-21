@@ -57,6 +57,24 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     else:
         logger.debug("Auth verification disabled, skipping")
 
+    # 并发上限检查（0 表示不限制）
+    max_sessions = settings.max_concurrent_sessions
+    if max_sessions > 0 and len(_sessions) >= max_sessions:
+        logger.warning(
+            f"Reject WS connection: active={len(_sessions)}, limit={max_sessions}, "
+            f"uniqueId={params.get('uniqueId', params.get('uuid', 'N/A'))}"
+        )
+        await ws.accept()
+        await ws.send_text(
+            build_session_result(
+                params.get("uniqueId", params.get("uuid", "")),
+                result=1003,
+                description="超出最大并发连接数",
+            )
+        )
+        await ws.close(4003, "Max concurrent sessions reached")
+        return
+
     # 接受连接
     await ws.accept()
 
