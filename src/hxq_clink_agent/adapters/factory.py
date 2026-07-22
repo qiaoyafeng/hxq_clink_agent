@@ -15,9 +15,11 @@ from ..interfaces.asr import ASRInterface
 from ..interfaces.asr_streaming import ASRStreamingInterface
 from ..interfaces.llm import LLMInterface
 from ..interfaces.tts import TTSInterface
+from ..interfaces.voice_to_voice import VoiceToVoiceInterface
 from .asr_dashscope import ASRDashScope
 from .asr_dashscope_streaming import ASRStreamingDashScope
 from .asr_stub import ASRStub
+from .baidu_rtc_voice import BaiduRTCVoiceAdapter
 from .llm_openai import LLMOpenAI
 from .llm_stub import LLMStub
 from .tts_dashscope import TTSDashScope
@@ -44,6 +46,11 @@ _LLM_REGISTRY: dict[str, type[LLMInterface]] = {
 _TTS_REGISTRY: dict[str, type[TTSInterface]] = {
     "stub": TTSStub,
     "dashscope": TTSDashScope,
+}
+
+# ── Voice-to-Voice 注册表 ──
+_VOICE_REGISTRY: dict[str, type[VoiceToVoiceInterface]] = {
+    "baidu": BaiduRTCVoiceAdapter,
 }
 
 
@@ -192,4 +199,57 @@ def create_tts(settings: Settings) -> TTSInterface:
         instance = cls()
 
     logger.info(f"TTS adapter created: provider={provider}, class={cls.__name__}")
+    return instance
+
+
+def create_voice(settings: Settings) -> VoiceToVoiceInterface | None:
+    """根据配置创建 Voice-to-Voice 适配器实例.
+
+    当 voice_provider 为空时返回 None，表示使用 ASR-LLM-TTS 管线模式。
+
+    Returns:
+        Voice-to-Voice 适配器实例；若未配置则返回 None
+    """
+    provider = settings.voice_provider.strip()
+
+    if not provider:
+        return None
+
+    if provider not in _VOICE_REGISTRY:
+        available = ", ".join(sorted(_VOICE_REGISTRY.keys()))
+        raise ValueError(
+            f"Unknown voice_provider: {provider!r}. Available: {available}"
+        )
+
+    cls = _VOICE_REGISTRY[provider]
+
+    if provider == "baidu":
+        instance = cls(
+            app_id=settings.baidu_rtc_app_id,
+            ak=settings.baidu_rtc_ak,
+            sk=settings.baidu_rtc_sk,
+            license_key=settings.baidu_rtc_license_key,
+            device_id=settings.baidu_rtc_device_id,
+            user_id=settings.baidu_rtc_user_id,
+            ws_endpoint=settings.baidu_rtc_ws_endpoint,
+            api_endpoint=settings.baidu_rtc_api_endpoint,
+            audio_codec=settings.baidu_rtc_audio_codec,
+            e2e_enabled=settings.baidu_rtc_e2e_enabled,
+            e2e_prompt=settings.baidu_rtc_e2e_prompt,
+            e2e_vcn=settings.baidu_rtc_e2e_vcn,
+            scene_role_name=settings.baidu_rtc_scene_role_name,
+            scene_role_prompt=settings.baidu_rtc_scene_role_prompt,
+            tts_vcn=settings.baidu_rtc_tts_vcn,
+            tts_sayhi=settings.baidu_rtc_tts_sayhi,
+            lang=settings.baidu_rtc_lang,
+            disable_auto_interrupt=settings.baidu_rtc_disable_auto_interrupt,
+            asr_vad=settings.baidu_rtc_asr_vad,
+            client_sample_rate=settings.pcm_sample_rate,
+        )
+    else:
+        instance = cls()
+
+    logger.info(
+        f"Voice adapter created: provider={provider}, class={cls.__name__}"
+    )
     return instance

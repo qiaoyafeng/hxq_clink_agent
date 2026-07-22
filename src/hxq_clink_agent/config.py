@@ -73,6 +73,34 @@ class Settings(BaseSettings):
     tts_voice: str = "longxiaochun_v2"
     tts_sample_rate: int = 22050
 
+    # ── Voice-to-Voice Provider（空值=使用ASR-LLM-TTS管线；"baidu"=使用百度RTC） ──
+    voice_provider: str = ""  # 可选: baidu（留空则使用 ASR-LLM-TTS 管线）
+
+    # ── 百度RTC大模型互动服务配置 ──
+    baidu_rtc_app_id: str = ""  # 百度RTC互动应用ID
+    baidu_rtc_ak: str = ""  # 百度云 Access Key ID
+    baidu_rtc_sk: str = ""  # 百度云 Secret Access Key
+    baidu_rtc_license_key: str = ""  # 设备 License Key
+    baidu_rtc_device_id: str = "hxq_clink_agent"  # 设备唯一标识
+    baidu_rtc_user_id: str = "default_user"  # 用户唯一标识
+    baidu_rtc_api_endpoint: str = "rtc-aiagent.baidubce.com"  # REST API 域名
+    baidu_rtc_ws_endpoint: str = "wss://rtc-aiotgw.exp.bcelive.com/v1/realtime"  # WebSocket 端侧接入地址
+    baidu_rtc_audio_codec: str = "raw16k"  # 音频编码: raw16k | pcmu | opus_cbr_16000
+
+    # 百度RTC模式选择
+    baidu_rtc_e2e_enabled: bool = False  # True=端到端语音模型(audio_to_audio), False=传统托管模式(ASR-LLM-TTS)
+    baidu_rtc_e2e_prompt: str = ""  # 端到端模型角色提示词
+    baidu_rtc_e2e_vcn: int = 8003  # 端到端模型音色(8003/8014/8008/8021)
+
+    # 百度RTC传统托管模式配置
+    baidu_rtc_scene_role_name: str = ""  # 控制台预设角色名（与 scene_role_prompt 二选一）
+    baidu_rtc_scene_role_prompt: str = ""  # 临时角色 prompt
+    baidu_rtc_tts_vcn: str = ""  # TTS 发音人
+    baidu_rtc_tts_sayhi: str = ""  # 招呼语
+    baidu_rtc_lang: str = "zh"  # 语言
+    baidu_rtc_disable_auto_interrupt: bool = False  # 是否关闭云端自动打断
+    baidu_rtc_asr_vad: int = 200  # ASR 断句等待时长(ms)
+
     # ── 日志 ──
     log_level: str = "INFO"
     access_log: bool = False

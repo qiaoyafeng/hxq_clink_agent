@@ -20,6 +20,10 @@ services:
       - ./src/hxq_clink_agent:/app/src/hxq_clink_agent
       - ./logs:/app/logs
 
+    # 容器时区设置（影响日志时间戳与系统时间）
+    environment:
+      - TZ=Asia/Shanghai
+
     # 从宿主机 .env 读取环境变量（HXQ_ 前缀的配置项）
     env_file:
       - .env

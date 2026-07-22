@@ -1,9 +1,10 @@
-"""适配器包 - ASR / LLM / TTS 的具体实现."""
+"""适配器包 - ASR / LLM / TTS / Voice-to-Voice 的具体实现."""
 
 from .asr_dashscope import ASRDashScope
 from .asr_dashscope_streaming import ASRStreamingDashScope
 from .asr_stub import ASRStub
-from .factory import create_asr, create_asr_streaming, create_llm, create_tts
+from .baidu_rtc_voice import BaiduRTCVoiceAdapter
+from .factory import create_asr, create_asr_streaming, create_llm, create_tts, create_voice
 from .llm_openai import LLMOpenAI
 from .llm_stub import LLMStub
 from .tts_dashscope import TTSDashScope
@@ -13,6 +14,7 @@ __all__ = [
     "ASRStub",
     "ASRDashScope",
     "ASRStreamingDashScope",
+    "BaiduRTCVoiceAdapter",
     "LLMStub",
     "LLMOpenAI",
     "TTSStub",
@@ -21,4 +23,5 @@ __all__ = [
     "create_asr_streaming",
     "create_llm",
     "create_tts",
+    "create_voice",
 ]

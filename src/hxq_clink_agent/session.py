@@ -8,6 +8,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from loguru import logger
 
 from .interfaces.asr_streaming import ASRStreamingInterface
+from .interfaces.voice_to_voice import VoiceToVoiceInterface
 from .audio_buffer import AudioBuffer
 from .config import Settings
 from .pipeline import Pipeline
@@ -40,6 +41,7 @@ class Session:
         settings: Settings,
         params: dict[str, str],
         asr_streaming: ASRStreamingInterface | None = None,
+        voice_adapter: VoiceToVoiceInterface | None = None,
     ):
         self.session_id = str(uuid.uuid4())
         # 初始从 query params 提取，后续可被 |CTL|00| 中的参数覆盖
@@ -55,6 +57,9 @@ class Session:
 
         # 流式 ASR（优先使用）
         self._asr_streaming = asr_streaming
+
+        # Voice-to-Voice 适配器（与 ASR-LLM-TTS 管线互斥）
+        self._voice_adapter = voice_adapter
 
         # 回退模式：本地 VAD 音频缓冲（仅在非流式模式下使用）
         self._audio_buffer: AudioBuffer | None = None
@@ -74,6 +79,12 @@ class Session:
         self._processing_task: asyncio.Task | None = None
         # Barge-in: 监控用户语音活动的 task
         self._barge_in_task: asyncio.Task | None = None
+
+        # Voice-to-Voice relay tasks
+        self._voice_relay_audio_task: asyncio.Task | None = None
+        self._voice_relay_event_task: asyncio.Task | None = None
+        # Voice-to-Voice: TTS 播报状态（用于 barge-in 检测）
+        self._voice_tts_speaking: bool = False
 
         # 流式音频发送缓冲（用于累积不足一帧的残余数据）
         self._send_buffer = b""
@@ -96,7 +107,8 @@ class Session:
         logger.info(
             f"Session created: id={self.session_id}, "
             f"uniqueId={self.unique_id}, cno={self.cno}, "
-            f"streaming={'yes' if self._asr_streaming else 'no'}"
+            f"streaming={'yes' if self._asr_streaming else 'no'}, "
+            f"voice_adapter={'yes' if self._voice_adapter else 'no'}"
         )
 
     async def run(self) -> None:
@@ -106,8 +118,18 @@ class Session:
             if not await self._wait_session_start():
                 return
 
-            # 启动流式 ASR
-            if self._asr_streaming:
+            # 启动流式 ASR 或 Voice-to-Voice 适配器
+            if self._voice_adapter:
+                # Voice-to-Voice 模式：启动适配器和 relay 协程
+                await self._voice_adapter.start()
+                self._voice_relay_audio_task = asyncio.create_task(
+                    self._relay_audio_loop()
+                )
+                self._voice_relay_event_task = asyncio.create_task(
+                    self._relay_event_loop()
+                )
+            elif self._asr_streaming:
+                # 流式 ASR 模式
                 await self._asr_streaming.start()
                 # 启动并发 task 持续消费已识别的句子
                 self._sentence_task = asyncio.create_task(self._consume_sentences())
@@ -137,7 +159,10 @@ class Session:
                             f"len={len(pcm_data)} bytes "
                             f"head={pcm_data[:16].hex()}"
                         )
-                        if self._asr_streaming:
+                        if self._voice_adapter:
+                            # Voice-to-Voice 模式：直接转发到适配器
+                            self._voice_adapter.feed(pcm_data)
+                        elif self._asr_streaming:
                             # 流式模式：直接转发到 DashScope
                             self._asr_streaming.feed(pcm_data)
                         elif self._audio_buffer:
@@ -331,6 +356,117 @@ class Session:
             )
         except Exception:
             pass
+
+    # ── Voice-to-Voice relay 方法 ──
+
+    async def _relay_audio_loop(self) -> None:
+        """Voice-to-Voice 模式：持续从适配器获取音频并发送给客户端."""
+        while not self._closed and self._voice_adapter:
+            try:
+                chunk = await self._voice_adapter.get_audio_chunk()
+                if chunk is None:
+                    logger.info(
+                        f"Session {self.session_id}: voice adapter audio stream ended"
+                    )
+                    break
+                if self._closed:
+                    break
+                await self._send_audio_chunk(chunk, self._resource_key)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(
+                    f"Session {self.session_id}: voice relay audio error: {e}"
+                )
+                break
+
+    async def _relay_event_loop(self) -> None:
+        """Voice-to-Voice 模式：持续从适配器获取事件并处理."""
+        while not self._closed and self._voice_adapter:
+            try:
+                event = await self._voice_adapter.get_event()
+                if event is None:
+                    logger.info(
+                        f"Session {self.session_id}: voice adapter event stream ended"
+                    )
+                    break
+
+                if event.event_type == "tts_begin":
+                    # 新的 TTS 播报开始
+                    if self._voice_tts_speaking:
+                        # 上一个 TTS 未结束，视为 barge-in
+                        logger.info(
+                            f"Session {self.session_id}: barge-in detected "
+                            f"(new TTS while previous still speaking)"
+                        )
+                        # 发送资源控制帧清客户端缓冲区
+                        try:
+                            await self._ws.send_text(
+                                build_resource_control(self._resource_key)
+                            )
+                        except Exception:
+                            pass
+                        self._send_buffer = b""
+
+                    self._resource_key += 1
+                    self._send_buffer = b""
+                    self._voice_tts_speaking = True
+                    logger.debug(
+                        f"Session {self.session_id}: TTS begin, "
+                        f"resource_key={self._resource_key}"
+                    )
+
+                elif event.event_type == "tts_end":
+                    # TTS 播报结束，刷出缓冲区
+                    self._voice_tts_speaking = False
+                    await self._flush_send_buffer(self._resource_key, is_end=True)
+                    logger.debug(
+                        f"Session {self.session_id}: TTS end, "
+                        f"resource_key={self._resource_key}"
+                    )
+
+                elif event.event_type == "asr_text":
+                    # 用户语音识别文本
+                    logger.info(
+                        f"Session {self.session_id}: voice ASR text: {event.content!r}"
+                    )
+                    # 转人工关键词检测
+                    if self._detect_transfer(event.content):
+                        await self._voice_adapter.interrupt()
+                        await self._trigger_transfer(event.content)
+
+                elif event.event_type == "llm_reply":
+                    logger.info(
+                        f"Session {self.session_id}: voice LLM reply: {event.content!r}"
+                    )
+
+                elif event.event_type == "media_ready":
+                    logger.info(
+                        f"Session {self.session_id}: voice media ready"
+                    )
+
+                elif event.event_type == "interrupt_word":
+                    logger.info(
+                        f"Session {self.session_id}: interrupt word hit: {event.content}"
+                    )
+
+                elif event.event_type == "function_call":
+                    logger.info(
+                        f"Session {self.session_id}: function call: {event.content}"
+                    )
+
+                elif event.event_type == "error":
+                    logger.error(
+                        f"Session {self.session_id}: voice adapter error: {event.content}"
+                    )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(
+                    f"Session {self.session_id}: voice relay event error: {e}"
+                )
+                break
 
     async def _on_sentence_recognized(self, text: str) -> None:
         """流式 ASR 识别到完整句子后的处理（流式 LLM + TTS）."""
@@ -586,6 +722,18 @@ class Session:
         # 发送挂机信号并延迟关闭连接
         await self._send_hangup()
 
+        # 停止 Voice-to-Voice 适配器
+        if self._voice_adapter:
+            # 取消 relay 协程
+            for task in (self._voice_relay_audio_task, self._voice_relay_event_task):
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+            await self._voice_adapter.stop()
+
         # 停止流式 ASR
         if self._asr_streaming:
             await self._asr_streaming.stop()
@@ -598,7 +746,7 @@ class Session:
             except asyncio.CancelledError:
                 pass
 
-        # 取消当前处理 task
+        # 取消当前处理 task（ASR-LLM-TTS 管线模式）
         if self._processing_task and not self._processing_task.done():
             self._processing_task.cancel()
             try:

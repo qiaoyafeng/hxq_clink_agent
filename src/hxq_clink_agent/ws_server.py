@@ -6,7 +6,7 @@ from urllib.parse import parse_qs
 from fastapi import APIRouter, WebSocket
 from loguru import logger
 
-from .adapters.factory import create_asr, create_asr_streaming, create_llm, create_tts
+from .adapters.factory import create_asr, create_asr_streaming, create_llm, create_tts, create_voice
 from .auth import verify_auth
 from .config import Settings
 from .pipeline import Pipeline
@@ -78,14 +78,28 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     # 接受连接
     await ws.accept()
 
-    # 创建管线和流式 ASR（通过工厂根据配置自动选择 Provider）
-    pipeline = Pipeline(
-        asr=create_asr(settings),
-        llm=create_llm(settings),
-        tts=create_tts(settings),
-        sample_rate=settings.pcm_sample_rate,
-    )
-    asr_streaming = create_asr_streaming(settings)
+    # 检查是否启用 Voice-to-Voice 模式
+    voice_adapter = create_voice(settings)
+
+    if voice_adapter:
+        # Voice-to-Voice 模式：不需要 Pipeline 和 ASRStreaming
+        pipeline = Pipeline(
+            asr=create_asr(settings),
+            llm=create_llm(settings),
+            tts=create_tts(settings),
+            sample_rate=settings.pcm_sample_rate,
+        )
+        asr_streaming = None
+        logger.info("WS endpoint: Voice-to-Voice mode (bypassing ASR-LLM-TTS pipeline)")
+    else:
+        # ASR-LLM-TTS 管线模式
+        pipeline = Pipeline(
+            asr=create_asr(settings),
+            llm=create_llm(settings),
+            tts=create_tts(settings),
+            sample_rate=settings.pcm_sample_rate,
+        )
+        asr_streaming = create_asr_streaming(settings)
 
     # 创建并运行会话
     session = Session(
@@ -94,6 +108,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         settings=settings,
         params=params,
         asr_streaming=asr_streaming,
+        voice_adapter=voice_adapter,
     )
     _sessions[session.session_id] = session
 
